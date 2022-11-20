@@ -15,9 +15,10 @@ PV = "M4-BSP"
 S = "${WORKDIR}/git"
 B =  "${WORKDIR}/build"
 
-export CROSS_COMPILE = "${RECIPE_SYSROOT_NATIVE}/${datadir}/gcc-arm-none-eabi/bin/arm-none-eabi-"
-export GCC_PATH = "${RECIPE_SYSROOT_NATIVE}/${datadir}/gcc-arm-none-eabi/bin"
-export NUECLIPSE = "${RECIPE_SYSROOT_NATIVE}/${datadir}/nu-eclipse"
+export CROSS_COMPILE = "${RECIPE_SYSROOT_NATIVE}${datadir}/gcc-arm-none-eabi/bin/arm-none-eabi-"
+export GCC_PATH = "${RECIPE_SYSROOT_NATIVE}${datadir}/gcc-arm-none-eabi/bin"
+export NUECLIPSE = "${RECIPE_SYSROOT_NATIVE}${datadir}/nu-eclipse"
+export SYSROOT_NATIVE_LIB = "${RECIPE_SYSROOT_NATIVE}${libdir}"
 export DISPLAY= ":99"
 
 python do_compile() {
@@ -26,6 +27,8 @@ python do_compile() {
     import shutil
     import fnmatch
     os.environ["PATH"] += os.pathsep + d.getVar('GCC_PATH',1)
+    # for gtk3
+    os.environ["LD_LIBRARY_PATH"] = d.getVar('SYSROOT_NATIVE_LIB', 1)
     f = open('gcc_log.txt', "w+")
     root = os.getcwd()
     os.chdir(d.getVar('S',1))
@@ -37,16 +40,20 @@ python do_compile() {
         for file in fnmatch.filter(fileNames, '*.cproject'):
             if not os.path.isdir(dirPath+"/Release"):
                 f.write("dirPath="+dirPath+"\n")
-                if not os.path.isdir("Temp"):
-                    os.mkdir("Temp")
+                tmpDir = "Temp"
+                if not os.path.isdir(tmpDir):
+                    os.mkdir(tmpDir)
                 else:
-                    shutil.rmtree("Temp")
-                    os.mkdir("Temp")
-                cmd = d.getVar('NUECLIPSE',1)+"/eclipse/eclipse -nosplash --launcher.suppressErrors -application org.eclipse.cdt.managedbuilder.core.headlessbuild -data Temp -cleanBuild all -import "+dirPath + "\n"
+                    shutil.rmtree(tmpDir)
+                    os.mkdir(tmpDir)
+
+                cmd = d.getVar('NUECLIPSE',1)+"/eclipse/eclipse -nosplash --launcher.suppressErrors " + \
+                        " -application org.eclipse.cdt.managedbuilder.core.headlessbuild " +  \
+                        " -data " + tmpDir + " -cleanBuild all -import " + dirPath + " \n"
                 f.write("cmd="+cmd+"\n")
                 f.flush()
                 retcode = subprocess.call(cmd,shell=True,stdout=f)
-                shutil.rmtree("Temp")
+                shutil.rmtree(tmpDir)
     os.chdir(root)
     f.close()
 }
@@ -84,7 +91,7 @@ python do_install() {
 
 do_deploy() {
     install -d ${DEPLOYDIR}/${BOOT_TOOLS}/m4proj
-    cp -rf ${D}/${exec_prefix}/m4proj/* ${DEPLOYDIR}/${BOOT_TOOLS}/m4proj/
+    cp -rf ${D}${exec_prefix}/m4proj/* ${DEPLOYDIR}/${BOOT_TOOLS}/m4proj/
 }
 
 INSANE_SKIP_${PN} = "arch"
