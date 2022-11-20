@@ -23,8 +23,9 @@ SRC_URI += " file://header-nand.json \
 
 DEPENDS += " \
     libusb1-native \
-    pyinstaller-native \
-    pyinstaller-hooks-contrib-native \
+    python3-native \
+    python3-pyinstaller-native \
+    python3-pyinstaller-hooks-contrib-native \
     python3-altgraph-native \
     python3-pyusb-native \
     python3-pycryptodome-native \
