@@ -6,13 +6,15 @@ LICENSE = "BSD-3-Clause"
 LIC_FILES_CHKSUM = "file://license.rst;md5=1dd070c98a281d18d9eefd938729b031"
 
 SRC_URI = "git://github.com/OpenNuvoton/MA35D1_arm-trusted-firmware-v2.3.git;branch=master;protocol=https"
+SRC_URI += "file://ssl.patch"
+
 SRCREV = "${TFA_SRCREV}"
 
 TF_VERSION = "2.3"
 PV = "${TF_VERSION}.r1"
 
 S = "${WORKDIR}/git"
-#B = "${WORKDIR}/build"
+B = "${WORKDIR}/build"
 
 COMPATIBLE_MACHINE = "(ma35d1)"
 
@@ -22,7 +24,7 @@ FILESEXTRAPATHS_prepend := "${THISDIR}/tf-a-ma35d1:"
 
 inherit deploy
 
-DEPENDS += "dtc-native"
+DEPENDS += "dtc-native openssl-native"
 
 SUMMARY = "Trusted Firmware-A for ma35d1"
 LICENSE = "BSD-3-Clause"
@@ -36,11 +38,45 @@ LDFLAGS[unexport] = "1"
 AS[unexport] = "1"
 LD[unexport] = "1"
 
+# CC and LD introduce arguments which conflict with those otherwise provided by
+# this recipe. The heads of these variables excluding those arguments
+# are therefore used instead.
+def remove_options_tail (in_string):
+    from itertools import takewhile
+    return ' '.join(takewhile(lambda x: not x.startswith('-'), in_string.split(' ')))
+
+EXTRA_OEMAKE += "LD=${@remove_options_tail(d.getVar('LD'))}"
+
+EXTRA_OEMAKE += "CC=${@remove_options_tail(d.getVar('CC'))}"
+
+# Verbose builds, no -Werror
+EXTRA_OEMAKE += "V=1 E=0"
+
+# Add platform parameter
+EXTRA_OEMAKE += "BUILD_BASE=${B} PLAT=${TFA_PLATFORM}"
+
+# Use the correct native compiler
+EXTRA_OEMAKE += "HOSTCC='${BUILD_CC}'"
+
+# Runtime variables
+EXTRA_OEMAKE += "RUNTIME_SYSROOT=${STAGING_DIR_HOST}"
+
+BUILD_DIR = "${B}/${TFA_PLATFORM}"
+BUILD_DIR .= "${@'/${TFA_BOARD}' if d.getVar('TFA_BOARD') else ''}"
+BUILD_DIR .= "/${@'debug' if d.getVar("TFA_DEBUG") == '1' else 'release'}"
+
+EXTRA_OEMAKE += "OPENSSL_DIR=${STAGING_DIR_NATIVE}${prefix_native}"
+
 # Configure ma35d1 make settings
 PLATFORM = "${TFA_PLATFORM}"
 export CROSS_COMPILE="${TARGET_PREFIX}"
 export ARCH="arm64"
 do_compile() {
+    # This is still needed to have the native tools executing properly by
+    # setting the RPATH
+    sed -i '/^LDLIBS/ s,$, \$\{BUILD_LDFLAGS},' ${S}/tools/fiptool/Makefile
+    sed -i '/^INCLUDE_PATHS/ s,$, \$\{BUILD_CFLAGS},' ${S}/tools/fiptool/Makefile
+    sed -i '/^LIB/ s,$, \$\{BUILD_LDFLAGS},' ${S}/tools/cert_create/Makefile
 
     TFA_OPT=" NEED_BL31=yes NEED_BL33=yes"
     if [ "${TFA_LOAD_M4}" = "yes" ]; then
@@ -67,7 +103,7 @@ do_compile() {
                 MA35D1_DRAM_SIZE=0x07800000 \
                 MA35D1_DDR_MAX_SIZE=0x8000000 \
                 MA35D1_DRAM_S_BASE=0x87800000 \
-                MA35D1_BL32_BASE=0x87800000-C ${S} fiptool
+                MA35D1_BL32_BASE=0x87800000 -C ${S} fiptool
 	elif echo ${TFA_DTB} | grep -q "512"; then
             oe_runmake PLAT=${PLATFORM} ${TFA_OPT} \
                 MA35D1_DRAM_SIZE=0x1F800000 \
@@ -83,7 +119,7 @@ do_compile() {
                 MA35D1_DRAM_SIZE=0x1F800000 \
                 MA35D1_DDR_MAX_SIZE=0x20000000 \
                 MA35D1_DRAM_S_BASE=0x9F800000 \
-                MA35D1_BL32_BASE=0x9F800000-C ${S} fiptool
+                MA35D1_BL32_BASE=0x9F800000 -C ${S} fiptool
 	elif echo ${TFA_DTB} | grep -q "1g"; then
             oe_runmake PLAT=${PLATFORM} ${TFA_OPT} \
                 MA35D1_DRAM_SIZE=0x3F800000 \
@@ -99,7 +135,7 @@ do_compile() {
                 MA35D1_DRAM_SIZE=0x3F800000 \
                 MA35D1_DDR_MAX_SIZE=0x40000000 \
                 MA35D1_DRAM_S_BASE=0xBF800000 \
-                MA35D1_BL32_BASE=0xBF800000-C ${S} fiptool
+                MA35D1_BL32_BASE=0xBF800000 -C ${S} fiptool
 	fi
     else
        oe_runmake PLAT=${PLATFORM} ${TFA_OPT} -C ${S} realclean
@@ -109,9 +145,9 @@ do_compile() {
 }
 
 do_deploy() {
-    install -Dm 0644 ${S}/build/${PLATFORM}/release/bl2.bin ${DEPLOYDIR}/${BOOT_TOOLS}/bl2-${PLATFORM}.bin
-    install -Dm 0644 ${S}/build/${PLATFORM}/release/fdts/${TFA_DTB}.dtb ${DEPLOYDIR}/${BOOT_TOOLS}/bl2-${PLATFORM}.dtb
-    install -Dm 0644 ${S}/build/${PLATFORM}/release/bl31.bin ${DEPLOYDIR}/${BOOT_TOOLS}/bl31-${PLATFORM}.bin
+    install -Dm 0644 ${B}/${PLATFORM}/release/bl2.bin ${DEPLOYDIR}/${BOOT_TOOLS}/bl2-${PLATFORM}.bin
+    install -Dm 0644 ${B}/${PLATFORM}/release/fdts/${TFA_DTB}.dtb ${DEPLOYDIR}/${BOOT_TOOLS}/bl2-${PLATFORM}.dtb
+    install -Dm 0644 ${B}/${PLATFORM}/release/bl31.bin ${DEPLOYDIR}/${BOOT_TOOLS}/bl31-${PLATFORM}.bin
     install -Dm 755 ${S}/tools/fiptool/fiptool  ${DEPLOYDIR}/${BOOT_TOOLS}/fiptool
 }
 addtask deploy after do_compile
