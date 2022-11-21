@@ -1,17 +1,21 @@
 SUMMARY = "OP-TEE sanity testsuite"
 HOMEPAGE = "https://github.com/OP-TEE/optee_test"
 
-LICENSE = "BSD-2-Clause & GPLv2"
+LICENSE = "BSD-2-Clause & GPL-2.0-only"
 LIC_FILES_CHKSUM = "file://${S}/LICENSE.md;md5=daa2bcccc666345ab8940aab1315a4fa"
 
-DEPENDS = "optee-client virtual/optee-os python3-pycryptodomex-native python3-pycrypto-native libgcc"
-
+DEPENDS = "optee-client \
+    virtual/optee-os \
+    python3-pycryptodomex-native \
+    python3-pycryptodome-native \
+    libgcc \
+"
 inherit python3native
 
 PV = "3.13.0+git${SRCPV}"
 
-SRC_URI = "git://github.com/OP-TEE/optee_test.git;protocol=https"
-
+SRC_URI = "git://github.com/OP-TEE/optee_test.git;protocol=https;branch=master"
+SRC_URI:append = " file://0003-remove-xtest-regression_7000.patch"
 S = "${WORKDIR}/git"
 
 SRCREV = "3ef6bf9e4b82df1ba0b381907c4d47cb23ad6bd5"
@@ -30,7 +34,6 @@ EXTRA_OEMAKE = " TA_DEV_KIT_DIR=${TA_DEV_KIT_DIR} \
                  LIBGCC_LOCATE_CFLAGS='--sysroot=${STAGING_DIR_HOST}' \
                "
 
-
 do_compile() {
     # Top level makefile doesn't seem to handle parallel make gracefully
     oe_runmake xtest
@@ -46,7 +49,7 @@ do_install () {
     install -D -p -m0444 ${S}/out/ta/*/*.ta ${D}${nonarch_base_libdir}/optee_armtz/
 }
 
-FILES_${PN} += "${nonarch_base_libdir}/optee_armtz/"
+FILES:${PN} += "${nonarch_base_libdir}/optee_armtz/*"
 
 # Imports machine specific configs from staging to build
 PACKAGE_ARCH = "${MACHINE_ARCH}"

@@ -1,8 +1,10 @@
 SUMMARY = "PyInstaller bundles a Python application and all its dependencies into a single package."
 HOMEPAGE = "http://www.pyinstaller.org/"
 AUTHOR = "Hartmut Goebel, Giovanni Bajo, David Vierra, David Cortesi, Martin Zibricky <>"
-LICENSE = "BSD"
-LIC_FILES_CHKSUM = "file://COPYING.txt;md5=6caf9c6da7a5d7bd095b1f2a7b118b8a"
+LICENSE = "Apache-2.0"
+LIC_FILES_CHKSUM = "file://COPYING.txt;md5=371fe7fdee041250f12b3a4658a14278"
+
+inherit pypi setuptools3 native
 
 SRCREV = "09b8a1ebd0a62c4e61de61cd33c739c997249a89"
 
@@ -16,9 +18,9 @@ RDEPENDS_${PN} = "python3-setuptools python3-altgraph python3-pyinstaller-hooks-
 
 DEPENDS += "python3-wheel-native"
 
-inherit native pypi setuptools3
+
 
 BBCLASSEXTEND = "native nativesdk"
 
 INHIBIT_SYSROOT_STRIP = "1"
-INSANK_SKIP_${PN}_append = "already-stripped"
+INSANK_SKIP:${PN}:append = "already-stripped"

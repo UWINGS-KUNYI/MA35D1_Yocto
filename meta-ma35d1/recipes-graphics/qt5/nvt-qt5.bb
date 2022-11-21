@@ -17,5 +17,5 @@ do_install() {
     install -d ${D}${datadir}/qt5
 }
 
-RDEPENDS_${PN} = "qtbase"
-FILES_${PN} += "${datadir}/qt5"
+RDEPENDS:${PN} = "qtbase"
+FILES:${PN} += "${datadir}/qt5"

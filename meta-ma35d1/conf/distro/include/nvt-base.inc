@@ -1,14 +1,14 @@
 # ma35d1 DISTRO for the FrameBuffer graphical backend.
 
 DISTRO = "nvt-base"
-DISTRO_NAME = "Nuvoton Release Distro"
-DISTRO_VERSION = "5.5-dunfell"
+DISTRO_NAME = "MA35D1 Unoffical Release Distro"
+DISTRO_VERSION = "5.5-kirkstone"
 
-DISTRO_CODENAME = "dunfell"
+DISTRO_CODENAME = "kirkstone"
 SDK_VENDOR = "-pokysdk"
 SDK_VERSION := "${DISTRO_VERSION}"
 
-MAINTAINER = "Nuvoton <www.nuvoton.com>"
+MAINTAINER = "KunYi <kunyi.chen@gmail.com>"
 
 TARGET_VENDOR = "-poky"
 

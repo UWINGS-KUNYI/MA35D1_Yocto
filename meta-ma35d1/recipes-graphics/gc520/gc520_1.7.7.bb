@@ -23,7 +23,7 @@ do_install() {
 		${D}/${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/galcore.ko
 }
 
-FILES_SOLIBSDEV = ""
-FILES_${PN} = "${libdir}/directfb-${RV}/gfxdrivers/libdirectfb_gal.so ${libdir}/libGAL.so ${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/galcore.ko"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
+FILES_SOLIBSDEV = ""
+FILES:${PN} = "${libdir}/directfb-${RV}/gfxdrivers/libdirectfb_gal.so ${libdir}/libGAL.so ${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/galcore.ko"
 COMPATIBLE_MACHINE = "(ma35d1)"

@@ -1,19 +1,23 @@
 
 DESCRIPTION = "ma35d1 M4 BSP suppporting ma35d1 ev boards."
-DEPENDS = " gcc-arm-none-eabi-native nu-eclipse-native "
-
-inherit deploy
-
-LICENSE = "BSD"
+LICENSE = "BSD-2-Clause & Apache-2.0"
 LIC_FILES_CHKSUM = "file://Library/CMSIS/CMSIS_END_USER_LICENCE_AGREEMENT.pdf;md5=2cd7232123b57896151a579127c8b51b"
 
-SRCREV= "master"
+DEPENDS = "\
+    freetype-native \
+    gcc-arm-none-eabi-native \
+    gtk+3-native \
+    nu-eclipse-native \
+"
 
+PV = "M4-BSP+git${SRCPV}"
 SRC_URI = "git://github.com/OpenNuvoton/MA35D1_RTP_BSP.git;protocol=https;branch=master"
+SRCREV = "${AUTOREV}"
 
-PV = "M4-BSP"
 S = "${WORKDIR}/git"
-B =  "${WORKDIR}/build"
+B = "${WORKDIR}/build"
+
+inherit deploy
 
 export CROSS_COMPILE = "${RECIPE_SYSROOT_NATIVE}${datadir}/gcc-arm-none-eabi/bin/arm-none-eabi-"
 export GCC_PATH = "${RECIPE_SYSROOT_NATIVE}${datadir}/gcc-arm-none-eabi/bin"
@@ -75,7 +79,7 @@ python do_install() {
     f.write("======= m480-bsp =======\n")
     for dirPath, dirNames, fileNames in os.walk("SampleCode"):
         for file in fnmatch.filter(fileNames, '*.elf'):
-            cmd = "cp "+ dirPath + "/" + file +" "+ d.getVar('D',1) + d.getVar('exec_prefix',1) + "/m4proj"
+            cmd = "install -m 664 "+ dirPath + "/" + file +" "+ d.getVar('D',1) + d.getVar('exec_prefix',1) + "/m4proj"
             f.write("cmd="+cmd+"\n")
             subprocess.call(cmd,shell=True,stdout=f)
 
@@ -94,10 +98,9 @@ do_deploy() {
     cp -rf ${D}${exec_prefix}/m4proj/* ${DEPLOYDIR}/${BOOT_TOOLS}/m4proj/
 }
 
-INSANE_SKIP_${PN} = "arch"
-FILESEXTRAPATHS_prepend := "${THISDIR}/files:"
-FILES_${PN} += "${exec_prefix}/m4proj/*"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
+FILES:${PN} += "${exec_prefix}/m4proj/*"
+INSANE_SKIP:${PN} = "arch"
 COMPATIBLE_MACHINE = "(ma35d1)"
 addtask deploy after do_install
 

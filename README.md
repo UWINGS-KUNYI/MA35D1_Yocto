@@ -4,7 +4,7 @@
 
 # Using repo to download source
 ```
-$ repo init -u https://github.com/UWINGS-KUNYI/MA35D1_Yocto.git -b dunfell -m meta-ma35d1/base/ma35d1.xml
+$ repo init -u https://github.com/UWINGS-KUNYI/MA35D1_Yocto.git -b kirkstone -m meta-ma35d1/base/ma35d1.xml
 $ repo sync
 ```
 ###### NOTE:

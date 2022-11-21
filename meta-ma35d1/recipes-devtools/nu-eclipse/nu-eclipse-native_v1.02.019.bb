@@ -1,10 +1,8 @@
 SUMMARY = "Eclipse IDE for Nuvoton"
-LICENSE = "BSD"
+LICENSE = "EPL-1.0"
 LIC_FILES_CHKSUM = "file://uninstall.sh;md5=39df560014ac09d72b216a22f2a68ce1"
 
 inherit native
-
-RDEPENDS = "gtk+3-native freetype-native"
 
 SRC_URI = "https://www.nuvoton.com/opencms/resource-download.jsp?tp_GUID=SW1120220429172024;downloadfilename=nu-eclipse.tar.gz;name=nu-eclipse"
 SRC_URI[nu-eclipse.md5sum] = "c1d3500fec22998f22f3f6f201736a25"

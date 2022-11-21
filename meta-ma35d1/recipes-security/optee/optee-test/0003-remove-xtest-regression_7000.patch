@@ -1,0 +1,21 @@
+diff --git a/host/xtest/Makefile b/host/xtest/Makefile
+index 3c206b0..813330b 100644
+--- a/host/xtest/Makefile
++++ b/host/xtest/Makefile
+@@ -74,7 +74,6 @@ srcs +=	adbg/src/adbg_case.c \
+ 	regression_4100.c \
+ 	regression_5000.c \
+ 	regression_6000.c \
+-	regression_7000.c \
+ 	regression_8000.c \
+ 	regression_8100.c \
+ 	sha_perf.c \
+@@ -104,7 +103,7 @@ endif
+ ifdef CFG_GP_PACKAGE_PATH
+ CFLAGS += -DWITH_GP_TESTS
+
+-srcs  += gp_7000.c \
++srcs  += \
+ 	 gp_7500.c \
+ 	 gp_8000.c \
+ 	 gp_8500.c \

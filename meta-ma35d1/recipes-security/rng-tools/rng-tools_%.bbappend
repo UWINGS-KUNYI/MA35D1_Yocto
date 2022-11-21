@@ -1,9 +1,10 @@
-FILESEXTRAPATHS_prepend := "${THISDIR}/${PN}:"
-SRC_URI += " \
-	file://rngd.service2 \
-	"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-do_install_append() {
+SRC_URI:append = " \
+    file://rngd.service2 \
+"
+
+do_install:append() {
     install -Dm 0644 ${WORKDIR}/default ${D}${sysconfdir}/default/rng-tools
     install -Dm 0755 ${WORKDIR}/init ${D}${sysconfdir}/init.d/rng-tools
     install -Dm 0644 ${WORKDIR}/rngd.service2 \

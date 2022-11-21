@@ -15,4 +15,4 @@ do_install() {
     install -m 0777 ${S}/capture.sh ${D}${bindir}/capture.sh
 }
 
-FILES_${PN} = "${sysconfdir} ${bindir}/capture.sh"
+FILES:${PN} = "${sysconfdir} ${bindir}/capture.sh"

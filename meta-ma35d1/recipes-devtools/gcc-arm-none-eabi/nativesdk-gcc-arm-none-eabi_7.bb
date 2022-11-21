@@ -5,4 +5,4 @@ require gcc-arm-none-eabi_${PV}.inc
 
 inherit nativesdk
 
-FILES_${PN} += "${datadir}/gcc-arm-none-eabi"
+FILES:${PN} += "${datadir}/gcc-arm-none-eabi"

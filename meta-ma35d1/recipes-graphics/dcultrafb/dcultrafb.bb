@@ -13,7 +13,7 @@ do_install() {
 		${D}/${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/dcultrafb.ko
 }
 
-FILES_SOLIBSDEV = ""
-FILES_${PN} = "${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/dcultrafb.ko"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
+FILES_SOLIBSDEV = ""
+FILES:${PN} = "${base_libdir}/modules/${PREFERRED_VERSION_linux-ma35d1}/dcultrafb.ko"
 COMPATIBLE_MACHINE = "(ma35d1)"

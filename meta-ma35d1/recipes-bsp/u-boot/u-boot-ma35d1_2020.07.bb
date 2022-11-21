@@ -2,32 +2,33 @@
 DESCRIPTION = "ma35d1 U-Boot suppporting ma35d1 ev boards."
 #SECTION = "bootloaders"
 require recipes-bsp/u-boot/u-boot.inc
+LICENSE = "GPL-2.0-or-later"
+LIC_FILES_CHKSUM = "file://Licenses/gpl-2.0.txt;md5=b234ee4d69f5fce4486a80fdaf4a4263"
 
-PROVIDES += "u-boot"
-DEPENDS += "dtc-native bc-native flex-native bison-native u-boot-scr-ma35d1"
+DEPENDS += "bc-native bison-native dtc-native flex-native u-boot-scr-ma35d1"
 
 unset _PYTHON_SYSCONFIGDATA_NAME
 
-LICENSE = "GPLv2+"
-LIC_FILES_CHKSUM = "file://Licenses/gpl-2.0.txt;md5=b234ee4d69f5fce4486a80fdaf4a4263"
+PROVIDES += "u-boot"
+
+PV = "${SRCBRANCH}+git${SRCPV}"
+LOCALVERSION ?= "-${SRCBRANCH}"
 
 UBOOT_SRC ?= "git://github.com/OpenNuvoton/MA35D1_u-boot-v2020.07.git;branch=master;protocol=https"
-
 SRCBRANCH = "2020.07"
 SRC_URI = "${UBOOT_SRC}"
+SRC_URI:append = " \
+    file://uEnv-spinand-ubi.cfg \
+    file://uEnv-nand-ubi.cfg \
+"
+
+UBOOT_SRCREV ?= "00218d51deef4c3322b5fabc974b1afd5067647f"
 SRCREV = "${UBOOT_SRCREV}"
 
-SRC_URI += " file://uEnv-spinand-ubi.cfg \
-             file://uEnv-nand-ubi.cfg \
-           "
-PV = "${SRCBRANCH}"
 S = "${WORKDIR}/git"
 B = "${WORKDIR}/build"
 
-LOCALVERSION ?= "-${SRCBRANCH}"
-
-
-do_compile_append() {
+do_compile:append() {
         unset i j
         for config in ${UBOOT_MACHINE}; do
             i=$(expr $i + 1);
@@ -84,9 +85,9 @@ do_compile_append() {
         unset  i
 }
 
-do_deploy_append() {
-    if [ -n "${UBOOT_CONFIG}" ]
-    then
+do_deploy:append() {
+    unset i j
+    if [ -n "${UBOOT_CONFIG}" ]; then
         for config in ${UBOOT_MACHINE}; do
             i=$(expr $i + 1);
             for type in ${UBOOT_CONFIG}; do
@@ -95,7 +96,7 @@ do_deploy_append() {
                 then
                     if [ -n "${UBOOT_INITIAL_ENV}" ]; then
                         ln -sf ${UBOOT_INITIAL_ENV}-${MACHINE}-${type}-${PV}-${PR} u-boot-env-${type}
-                        cp ${B}/${config}/u-boot-initial-env.bin-${type} ${DEPLOYDIR}/u-boot-initial-env.bin-${type}
+                        cp ${B}/${config}/u-boot-initial-env.bin-${type} ${DEPLOYDIR}
                     fi
                 fi
 
@@ -111,7 +112,16 @@ do_deploy_append() {
     fi
 }
 
-do_deploy_setscene_apply() {
+do_deploy_setscene:apply() {
+
+    if [ -n "${UBOOT_CONFIG}" ]; then
+        for type in ${UBOOT_CONFIG}; do
+            if [ -n "${UBOOT_INITIAL_ENV}" ]; then
+                cp ${DEPLOYDIR}/u-boot-initial-env.bin-${type} ${DEPLOY_IMAGE_DIR}
+            fi
+        done
+    fi
+
     if [ -f ${DEPLOYDIR}/u-boot-initial-env-spinand-ubi.cfg ]; then
         cp ${DEPLOYDIR}/u-boot-initial-env-spinand-ubi.cfg ${DEPLOY_IMAGE_DIR}
     fi

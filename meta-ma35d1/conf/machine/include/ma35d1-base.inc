@@ -8,8 +8,8 @@ MACHINEOVERRIDES = "ma35d1"
 # =========================================================================
 # Chip architecture
 # =========================================================================
-DEFAULTTUNE_ma35d1 = "cortexa35-crypto"
-include conf/machine/include/tune-cortexa35.inc
+DEFAULTTUNE:ma35d1 = "cortexa35-crypto"
+include conf/machine/include/arm/armv8a/tune-cortexa35.inc
 
 # =========================================================================
 # Kernel
@@ -25,7 +25,7 @@ PREFERRED_PROVIDER_virtual/bootloader = "u-boot-ma35d1"
 
 EXTRA_IMAGEDEPENDS += "virtual/bootloader"
 
-UBOOT_ENTRYPOINT_ma35d1 = "0x80E00000"
+UBOOT_ENTRYPOINT:ma35d1 = "0x80E00000"
 # =========================================================================
 # trusted-firmware-a
 # =========================================================================

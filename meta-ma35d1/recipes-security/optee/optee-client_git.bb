@@ -8,13 +8,13 @@ PV = "3.13.0+git${SRCPV}"
 
 inherit python3native systemd
 
-SRC_URI = "git://github.com/OP-TEE/optee_client.git \
+SRC_URI = "git://github.com/OP-TEE/optee_client.git;protocol=https;branch=master \
            file://tee-supplicant.service \
     "
 
-S = "${WORKDIR}/git"
-
 SRCREV = "347144b79964233e718347e3f0fbe89ab5be46ae"
+
+S = "${WORKDIR}/git"
 
 SYSTEMD_SERVICE_${PN} = "tee-supplicant.service"
 
@@ -38,3 +38,8 @@ do_install() {
         install -D -p -m0644 ${WORKDIR}/tee-supplicant.service ${D}${systemd_system_unitdir}/tee-supplicant.service
     fi
 }
+
+FILES:${PN} += "${bindir}/* \
+    ${libdir}/* \
+    ${systemd_system_unitdir}/tee-supplicant.service \
+"

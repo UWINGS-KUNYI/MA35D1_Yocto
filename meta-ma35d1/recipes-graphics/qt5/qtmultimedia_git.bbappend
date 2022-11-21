@@ -1,4 +1,3 @@
-FILESEXTRAPATHS_prepend := "${THISDIR}/${PN}:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI+="file://qgstvideorender_disable_timeout.patch"
-
+SRC_URI:append = " file://qgstvideorender_disable_timeout.patch"

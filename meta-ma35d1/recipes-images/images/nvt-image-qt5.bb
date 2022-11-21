@@ -3,17 +3,18 @@ LICENSE = "Proprietary"
 
 inherit populate_sdk_qt5
 
-inherit core-image 
+inherit core-image
 
 IMAGE_LINGUAS = "en-us"
 
 IMAGE_FEATURES += "splash package-management ssh-server-dropbear hwcodecs"
 
-IMAGE_FSTYPES_remove = " ubi spinand nand"
+#IMAGE_FSTYPES:remove = " ubi spinand nand"
+IMAGE_FSTYPES:remove = " ubi "
 
-PACKAGECONFIG_append = " examples accessibility "
+PACKAGECONFIG:append = " examples accessibility "
 
-IMAGE_INSTALL_append = "\
+IMAGE_INSTALL:append = "\
     ttf-dejavu-sans \
     ttf-dejavu-sans-mono \
     ttf-dejavu-sans-condensed \

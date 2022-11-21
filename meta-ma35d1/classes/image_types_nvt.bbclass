@@ -1,46 +1,54 @@
 inherit image_types
 
-DEPENDS = " python3-nuwriter-native gcc-arm-none-eabi-native"
+DEPENDS = "\
+    gcc-arm-none-eabi-native \
+    parted-native \
+    python3-nuwriter-native \
+"
 
-IMAGE_TYPEDEP_nand = "ubi"
-do_image_nand[depends] = "virtual/trusted-firmware-a:do_deploy \
-		          ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
-                          virtual/kernel:do_deploy \
-                          virtual/bootloader:do_deploy \
-                          python3-nuwriter-native:do_install \
-                          jq-native:do_populate_sysroot \
-                          mtd-utils-native:do_populate_sysroot \
-                          m4proj:do_deploy \
-                         "
+IMAGE_TYPEDEP:nand = "ubi"
+do_image:nand[depends] = "\
+    virtual/trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    virtual/kernel:do_deploy \
+    virtual/bootloader:do_deploy \
+    python3-nuwriter-native:do_install \
+    jq-native:do_populate_sysroot \
+    mtd-utils-native:do_populate_sysroot \
+    m4proj:do_deploy \
+"
 
-IMAGE_TYPEDEP_spinand = "ubi"
-do_image_spinand[depends] = "virtual/trusted-firmware-a:do_deploy \
-                             ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
-                             virtual/kernel:do_deploy \
-                             virtual/bootloader:do_deploy \
-                             python3-nuwriter-native:do_install \
-                             jq-native:do_populate_sysroot \
-                             mtd-utils-native:do_populate_sysroot \
-                             m4proj:do_deploy \
-                             ${@bb.utils.contains('IMAGE_FSTYPES', 'nand', '${IMAGE_BASENAME}:do_image_nand', '', d)} \
-                            "
+IMAGE_TYPEDEP:spinand = "ubi"
+do_image:spinand[depends] = "\
+    virtual/trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    virtual/kernel:do_deploy \
+    virtual/bootloader:do_deploy \
+    python3-nuwriter-native:do_install \
+    jq-native:do_populate_sysroot \
+    mtd-utils-native:do_populate_sysroot \
+    m4proj:do_deploy \
+    ${@bb.utils.contains('IMAGE_FSTYPES', 'nand', '${IMAGE_BASENAME}:do_image:nand', '', d)} \
+"
 
-IMAGE_TYPEDEP_sdcard = "ext4"
-do_image_sdcard[depends] = "parted-native:do_populate_sysroot \
-                            virtual/trusted-firmware-a:do_deploy \
-                            ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
-                            virtual/kernel:do_deploy \
-                            virtual/bootloader:do_deploy \
-                            python3-nuwriter-native:do_install \
-                            jq-native:do_populate_sysroot \
-                            m4proj:do_deploy \
-                            ${@bb.utils.contains('IMAGE_FSTYPES', 'nand', '${IMAGE_BASENAME}:do_image_nand', '', d)} \
-                            ${@bb.utils.contains('IMAGE_FSTYPES', 'spinand', '${IMAGE_BASENAME}:do_image_spinand', '', d)} \
-                           "
+IMAGE_TYPEDEP:sdcard = "ext4"
+do_image:sdcard[depends] = "\
+    parted-native:do_populate_sysroot \
+    virtual/trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    virtual/kernel:do_deploy \
+    virtual/bootloader:do_deploy \
+    python3-nuwriter-native:do_install \
+    jq-native:do_populate_sysroot \
+    m4proj:do_deploy \
+    ${@bb.utils.contains('IMAGE_FSTYPES', 'nand', '${IMAGE_BASENAME}:do_image:nand', '', d)} \
+    ${@bb.utils.contains('IMAGE_FSTYPES', 'spinand', '${IMAGE_BASENAME}:do_image:spinand', '', d)} \
+"
+
 NUWRITER_DIR="${RECIPE_SYSROOT_NATIVE}${datadir}/nuwriter"
 M4_OPJCOPY="${RECIPE_SYSROOT_NATIVE}${datadir}/gcc-arm-none-eabi/arm-none-eabi/bin/objcopy"
 
-IMAGE_CMD_spinand() {
+IMAGE_CMD:spinand() {
     if [ -f ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-spinand.pack ]; then
         rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-spinand.bin -f
         rm ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-spinand.pack -f
@@ -134,9 +142,9 @@ IMAGE_CMD_spinand() {
              rm -rf $(date "+%m%d-*");)
         fi
     fi
-} 
+}
 
-IMAGE_CMD_nand() {
+IMAGE_CMD:nand() {
     if [ -f ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-nand.pack ]; then
         rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-nand.bin -f
         rm ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-nand.pack -f
@@ -148,14 +156,14 @@ IMAGE_CMD_nand() {
     fi
     # Generate the FIP image  with the bl2.bin and required Device Tree
     if ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'true', 'false', d)}; then
-	if [ "${TFA_LOAD_M4}" = "no" ]; then
+        if [ "${TFA_LOAD_M4}" = "no" ]; then
             ${DEPLOY_DIR_IMAGE}/fiptool create \
                 --soc-fw ${DEPLOY_DIR_IMAGE}/bl31-${TFA_PLATFORM}.bin \
                 --tos-fw ${DEPLOY_DIR_IMAGE}/tee-header_v2-optee.bin \
                 --tos-fw-extra1 ${DEPLOY_DIR_IMAGE}/tee-pager_v2-optee.bin \
                 --nt-fw ${DEPLOY_DIR_IMAGE}/u-boot.bin-nand \
             ${DEPLOY_DIR_IMAGE}/fip_with_optee-${IMAGE_BASENAME}-${MACHINE}.bin-nand
-	else
+        else
             if [ -f ${DEPLOY_DIR_IMAGE}/${TFA_M4_BIN} ]; then
                 ${DEPLOY_DIR_IMAGE}/fiptool create \
                     --scp-fw ${DEPLOY_DIR_IMAGE}/${TFA_M4_BIN} \
@@ -167,7 +175,7 @@ IMAGE_CMD_nand() {
             else
                 bberror "Could not found ${DEPLOY_DIR_IMAGE}/${TFA_M4_BIN}"
             fi
-	fi
+        fi
         (cd ${DEPLOY_DIR_IMAGE}; ln -sf fip_with_optee-${IMAGE_BASENAME}-${MACHINE}.bin-nand fip.bin-nand)
     else
         if [ "${TFA_LOAD_M4}" = "no" ]; then
@@ -239,14 +247,14 @@ BOOT_SPACE ?= "32768"
 # Set alignment in KiB
 IMAGE_ROOTFS_ALIGNMENT ?= "4096"
 
-IMAGE_CMD_sdcard() {
+IMAGE_CMD:sdcard() {
     BOOT_SPACE_ALIGNED=$(expr ${BOOT_SPACE} - 1 )
     if [ -f ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.pack ]; then
-	rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.bin -f
+        rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.bin -f
         rm ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.pack -f
         rm ${DEPLOY_DIR_IMAGE}/pack-${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.bin -f
     elif [ -f ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-sdcard.pack ]; then
-	rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-sdcard.bin -f
+        rm ${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-sdcard.bin -f
         rm ${DEPLOY_DIR_IMAGE}/${IMAGE_BASENAME}-${MACHINE}-sdcard.pack -f
         rm ${DEPLOY_DIR_IMAGE}/pack-${IMAGE_BASENAME}-${MACHINE}-sdcard.bin -f
     fi
@@ -356,7 +364,7 @@ IMAGE_CMD_sdcard() {
             dd if=${DEPLOY_DIR_IMAGE}/bl2-ma35d1.bin of=${SDCARD} conv=notrunc seek=384 bs=512
         else
             # 0x400
-        dd if=${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.bin of=${SDCARD} conv=notrunc seek=2 bs=512
+            dd if=${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-enc-sdcard.bin of=${SDCARD} conv=notrunc seek=2 bs=512
             # 0x20000
             dd if=${DEPLOY_DIR_IMAGE}/enc_bl2-ma35d1-sdcard.dtb of=${SDCARD} conv=notrunc seek=256 bs=512
             # 0x30000
@@ -374,4 +382,3 @@ IMAGE_CMD_sdcard() {
         dd if=${IMGDEPLOYDIR}/${IMAGE_NAME}.rootfs.ext4 of=${SDCARD} conv=notrunc,fsync seek=1 bs=$(expr ${BOOT_SPACE_ALIGNED} \* 1024 + ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)
     fi
 }
-

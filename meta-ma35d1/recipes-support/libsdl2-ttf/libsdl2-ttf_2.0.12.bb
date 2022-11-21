@@ -16,7 +16,7 @@ inherit autotools
 
 TARGET_CC_ARCH += "${LDFLAGS}"
 
-do_configure_prepend() {
+do_configure:prepend() {
     touch ${S}/NEWS ${S}/README ${S}/AUTHORS ${S}/ChangeLog
 
     # Removing these files fixes a libtool version mismatch.

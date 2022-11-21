@@ -1,17 +1,16 @@
-# Copyright (C) 2019-2022
-# Copyright 2019-2022 Nuvoton
-# Released under the MIT license (see COPYING.MIT for the terms)
-
 SUMMARY = "Linux Kernel provided and supported by Nuvoton"
 DESCRIPTION = "Linux Kernel provided and supported by Nuvoton ma35d1"
-LICENSE = "GPL-2.0-only"
+LICENSE = "GPLv2"
 LIC_FILES_CHKSUM = "file://COPYING;md5=6bc538ed5bd9a7fc9398086aedcd7e46"
 
 inherit kernel
 
 DEPENDS:append = " \
+    kmod-native \
     libyaml-native \
     openssl-native \
+    python3-native \
+    rpm-native \
     util-linux-native \
 "
 
@@ -20,18 +19,13 @@ DEPENDS:append = " \
 ma35d1_KERNEL_LOADADDR = "0x80080000"
 KERNEL_EXTRA_ARGS += "LOADADDR=${ma35d1_KERNEL_LOADADDR}"
 
-SRCBRANCH = "master"
-LOCALVERSION = "-${SRCBRANCH}"
-KERNEL_SRCREV ?= "20db7928f555f3a9d3b1ba6290de65b23cfefe5e"
-KERNEL_SRC = "git://github.com/OpenNuvoton/MA35D1_linux-5.10.y.git;protocol=https;branch=${SRCBRANCH}"
-SRC_URI:ma35d1 = "${KERNEL_SRC}"
-SRC_URI:append:ma35d1 = " \
+SRC_URI:append = " \
     file://optee.config \
     file://cfg80211.config \
-   ${@bb.utils.contains('DISTRO_FEATURES', '88x2bu', ' file://88x2bu.ko', '', d)} \
+    ${@bb.utils.contains('DISTRO_FEATURES', '88x2bu', ' file://88x2bu.ko', '', d)} \
 "
-SRCREV:ma35d1 = "${KERNEL_SRCREV}"
 
+SRCREV="${KERNEL_SRCREV}"
 S = "${WORKDIR}/git"
 B = "${WORKDIR}/build"
 
@@ -41,7 +35,7 @@ B = "${WORKDIR}/build"
 # Kernel image type
 KERNEL_IMAGETYPE = "Image"
 
-do_configure:prepend:ma35d1() {
+do_configure:prepend() {
     bbnote "Copying defconfig"
     cp ${S}/arch/${ARCH}/configs/${KERNEL_DEFCONFIG} ${WORKDIR}/defconfig
     cat ${WORKDIR}/cfg80211.config >> ${WORKDIR}/defconfig
@@ -51,7 +45,7 @@ do_configure:prepend:ma35d1() {
     fi
 }
 
-do_deploy:append:ma35d1() {
+do_deploy:append() {
     for dtbf in ${KERNEL_DEVICETREE}; do
         dtb=`normalize_dtb "$dtbf"`
         dtb_ext=${dtb##*.}
@@ -60,12 +54,12 @@ do_deploy:append:ma35d1() {
     done
 }
 
-do_install:append:ma35d1() {
+do_install:append() {
     if [ -e ${WORKDIR}/88x2bu.ko ]; then
         install -d ${D}/${base_libdir}/modules/${PV}
         install -m 0644 ${WORKDIR}/88x2bu.ko ${D}/${base_libdir}/modules/${PV}/88x2bu.ko
     fi
 }
 
-FILES:${PN} += "${base_libdir}/modules/${PV}/${@bb.utils.contains('DISTRO_FEATURES', '88x2bu', '88x2bu.ko', '', d)}"
+FILES:${PN} = "${base_libdir}/modules/${PV}/${@bb.utils.contains('DISTRO_FEATURES', '88x2bu', '88x2bu.ko', '', d)}"
 COMPATIBLE_MACHINE = "(ma35d1)"
