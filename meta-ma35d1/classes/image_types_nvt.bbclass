@@ -8,8 +8,8 @@ DEPENDS = "\
 
 IMAGE_TYPEDEP:nand = "ubi"
 do_image:nand[depends] = "\
-    virtual/trusted-firmware-a:do_deploy \
-    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'optee-os:do_deploy', '',d)} \
     virtual/kernel:do_deploy \
     virtual/bootloader:do_deploy \
     python3-nuwriter-native:do_install \
@@ -20,8 +20,8 @@ do_image:nand[depends] = "\
 
 IMAGE_TYPEDEP:spinand = "ubi"
 do_image:spinand[depends] = "\
-    virtual/trusted-firmware-a:do_deploy \
-    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'optee-os:do_deploy', '',d)} \
     virtual/kernel:do_deploy \
     virtual/bootloader:do_deploy \
     python3-nuwriter-native:do_install \
@@ -33,8 +33,8 @@ do_image:spinand[depends] = "\
 IMAGE_TYPEDEP:sdcard = "ext4"
 do_image:sdcard[depends] = "\
     parted-native:do_populate_sysroot \
-    virtual/trusted-firmware-a:do_deploy \
-    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'virtual/optee-os:do_deploy', '',d)} \
+    trusted-firmware-a:do_deploy \
+    ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'optee-os:do_deploy', '',d)} \
     virtual/kernel:do_deploy \
     virtual/bootloader:do_deploy \
     python3-nuwriter-native:do_install \
@@ -273,11 +273,11 @@ IMAGE_CMD:sdcard() {
         fi
 
         if [ "${SECURE_BOOT}" = "no" ]; then
-            # 0x400
+            # 0x400, 1KB
             dd if=${DEPLOY_DIR_IMAGE}/header-${IMAGE_BASENAME}-${MACHINE}-sdcard.bin of=${SDCARD} conv=notrunc seek=2 bs=512
-            # 0x20000
+            # 0x20000, 128KiB, (dtbs for BL2)
             dd if=${DEPLOY_DIR_IMAGE}/bl2-ma35d1.dtb of=${SDCARD} conv=notrunc seek=256 bs=512
-            # 0x30000
+            # 0x30000, 192KB
             dd if=${DEPLOY_DIR_IMAGE}/bl2-ma35d1.bin of=${SDCARD} conv=notrunc seek=384 bs=512
         else
             # 0x400
@@ -287,13 +287,13 @@ IMAGE_CMD:sdcard() {
             # 0x30000
             dd if=${DEPLOY_DIR_IMAGE}/enc_bl2-ma35d1-sdcard.bin of=${SDCARD} conv=notrunc seek=384 bs=512
         fi
-        # 0x40000
+        # 0x40000, 256KiB, U-Boot Environments Variables
         dd if=${DEPLOY_DIR_IMAGE}/u-boot-initial-env.bin-sdcard of=${SDCARD} conv=notrunc seek=512 bs=512
-        # 0xC0000
+        # 0xC0000, 768KiB, FIT Images (U-Boot, OP-TEE)
         dd if=${DEPLOY_DIR_IMAGE}/fip.bin-sdcard of=${SDCARD} conv=notrunc seek=1536 bs=512
-        # 0x2c0000
+        # 0x2c0000, 2816KiB, 2MiB + 768KiB, (dtbs for Kernel)
         dd if=${DEPLOY_DIR_IMAGE}/$(basename ${KERNEL_DEVICETREE}) of=${SDCARD} conv=notrunc seek=5632 bs=512
-        # 0x300000
+        # 0x300000, 3MiB, Kernel Image
         dd if=${DEPLOY_DIR_IMAGE}/Image-${MACHINE}.bin of=${SDCARD} conv=notrunc seek=6144 bs=512
         # root fs
         dd if=${IMGDEPLOYDIR}/${IMAGE_NAME}.rootfs.ext4 of=${SDCARD} conv=notrunc,fsync seek=1 bs=$(expr ${BOOT_SPACE_ALIGNED} \* 1024 + ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)

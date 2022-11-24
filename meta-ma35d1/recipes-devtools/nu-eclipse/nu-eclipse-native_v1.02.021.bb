@@ -4,11 +4,11 @@ LIC_FILES_CHKSUM = "file://uninstall.sh;md5=39df560014ac09d72b216a22f2a68ce1"
 
 inherit native
 
-SRC_URI = "https://www.nuvoton.com/opencms/resource-download.jsp?tp_GUID=SW1120220429172024;downloadfilename=nu-eclipse-v1.02.019.tar.gz;name=nu-eclipse"
-SRC_URI[nu-eclipse.md5sum] = "c1d3500fec22998f22f3f6f201736a25"
-SRC_URI[nu-eclipse.sha256sum] = "fa13f04f408432511e530ae505450211606703e7bd59a2dfd71af71ac09abf9e"
+SRC_URI = "https://www.nuvoton.com/opencms/resource-download.jsp?tp_GUID=SW132022111608014594;downloadfilename=nu-eclipse-v1.02.021.tar.gz;name=nu-eclipse"
+SRC_URI[nu-eclipse.md5sum] = "e7d042b0cc07a598d2bcd6963bc81e7d"
+SRC_URI[nu-eclipse.sha256sum] = "5ff91759943683943aeb323aff1dfabb857485e519edb3e8b01a40067476abcb"
 
-S = "${WORKDIR}/NuEclipse_V1.02.019_Linux_Setup"
+S = "${WORKDIR}/NuEclipse_V1.02.021_Linux_Setup"
 
 do_install() {
 	install -d ${D}/${datadir}/nu-eclipse

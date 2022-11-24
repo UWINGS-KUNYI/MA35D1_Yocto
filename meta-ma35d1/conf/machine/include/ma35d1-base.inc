@@ -31,16 +31,20 @@ UBOOT_ENTRYPOINT:ma35d1 = "0x80E00000"
 # =========================================================================
 TFA_PLATFORM ?= "ma35d1"
 TFA_DTB ?= "ma35d1xx7"
-PREFERRED_PROVIDER_virtual/trusted-firmware-a = "tf-a-ma35d1"
-EXTRA_IMAGEDEPENDS += "virtual/trusted-firmware-a"
+PREFERRED_PROVIDER_trusted-firmware-a = "trusted-firmware-a"
+PREFERRED_VERSION_trusted-firmware-a = "2.6"
+EXTRA_IMAGEDEPENDS += "trusted-firmware-a"
 
 # =========================================================================
 # optee-os
 # =========================================================================
+OPTEE_ARCH="arm64"
 OPTEE_PLATFORM = "nuvoton"
 OPTEE_PLATFORM_FLAVOR = "MA35D1"
-PREFERRED_PROVIDER_virtual/optee-os = "optee-os-ma35d1"
-EXTRA_IMAGEDEPENDS += "virtual/optee-os"
+OPTEEMACHINE="nuvoton-MA35D1"
+PREFERRED_PROVIDER_optee-os = "optee-os"
+PREFERRED_VERSION_optee-os = "3.18.0"
+EXTRA_IMAGEDEPENDS += "optee-os"
 
 # =========================================================================
 # m4proj

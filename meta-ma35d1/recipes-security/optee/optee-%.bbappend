@@ -1,0 +1,3 @@
+
+COMPATIBLE_MACHINE:ma35d1 = "(ma35d1)"
+# EXTRA_OEMAKE:append:ma35d1 = "PLATFORM=nuvoton-MA35D1"

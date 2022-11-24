@@ -1,0 +1,5047 @@
+From 3806939bb51edb44ec6752d8c76e49f0b02bea9b Mon Sep 17 00:00:00 2001
+From: KunYi Chen <kunyi.chen@gmail.com>
+Date: Wed, 23 Nov 2022 00:13:20 +0800
+Subject: [PATCH] add nuvoton support from MA35D1_optee_os_v3.9.0
+
+---
+ core/arch/arm/plat-nuvoton/conf.mk            |   35 +
+ core/arch/arm/plat-nuvoton/main.c             |   85 ++
+ core/arch/arm/plat-nuvoton/platform_config.h  |   71 +
+ core/arch/arm/plat-nuvoton/pta/crypto_pta.c   |  838 ++++++++++++
+ core/arch/arm/plat-nuvoton/pta/crypto_pta.h   |  295 ++++
+ .../arm/plat-nuvoton/pta/crypto_pta_client.h  |  162 +++
+ core/arch/arm/plat-nuvoton/pta/ks_pta.c       |  706 ++++++++++
+ .../arch/arm/plat-nuvoton/pta/ks_pta_client.h |  142 ++
+ core/arch/arm/plat-nuvoton/pta/sub.mk         |    5 +
+ core/arch/arm/plat-nuvoton/pta/trng_pta.c     |  383 ++++++
+ .../arm/plat-nuvoton/pta/trng_pta_client.h    |   48 +
+ core/arch/arm/plat-nuvoton/sub.mk             |    4 +
+ core/arch/arm/plat-nuvoton/tsi_cmd.c          | 1200 +++++++++++++++++
+ core/arch/arm/plat-nuvoton/tsi_cmd.h          |  248 ++++
+ core/arch/arm/plat-nuvoton/tsi_patch.c        |  234 ++++
+ core/arch/arm/plat-nuvoton/whc.h              |  276 ++++
+ core/drivers/nuvoton_uart.c                   |  103 ++
+ core/drivers/sub.mk                           |    1 +
+ core/include/drivers/nuvoton_uart.h           |   44 +
+ 19 files changed, 4880 insertions(+)
+ create mode 100644 core/arch/arm/plat-nuvoton/conf.mk
+ create mode 100644 core/arch/arm/plat-nuvoton/main.c
+ create mode 100644 core/arch/arm/plat-nuvoton/platform_config.h
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/crypto_pta.c
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/crypto_pta.h
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/crypto_pta_client.h
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/ks_pta.c
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/ks_pta_client.h
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/sub.mk
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/trng_pta.c
+ create mode 100644 core/arch/arm/plat-nuvoton/pta/trng_pta_client.h
+ create mode 100644 core/arch/arm/plat-nuvoton/sub.mk
+ create mode 100644 core/arch/arm/plat-nuvoton/tsi_cmd.c
+ create mode 100644 core/arch/arm/plat-nuvoton/tsi_cmd.h
+ create mode 100755 core/arch/arm/plat-nuvoton/tsi_patch.c
+ create mode 100644 core/arch/arm/plat-nuvoton/whc.h
+ create mode 100644 core/drivers/nuvoton_uart.c
+ create mode 100644 core/include/drivers/nuvoton_uart.h
+
+diff --git a/core/arch/arm/plat-nuvoton/conf.mk b/core/arch/arm/plat-nuvoton/conf.mk
+new file mode 100644
+index 0000000..3ab2025
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/conf.mk
+@@ -0,0 +1,35 @@
++PLATFORM_FLAVOR ?= MA35D1
++
++CFG_TZDRAM_START ?= 0x8f800000
++CFG_TZDRAM_SIZE ?=  0x00700000
++CFG_SHMEM_START ?=  0x8ff00000
++CFG_SHMEM_SIZE ?=   0x00100000
++
++$(call force,CFG_TEE_CORE_NB_CORE,2)
++
++$(call force,CFG_NUVOTON_UART,y)
++$(call force,CFG_GENERIC_BOOT,y)
++$(call force,CFG_PM_STUBS,y)
++$(call force,CFG_SECURE_TIME_SOURCE_CNTPCT,y)
++$(call force,CFG_WITH_ARM_TRUSTED_FW,y)
++$(call force,CFG_ARM64_core,y)
++$(call force,CFG_TEE_CORE_LOG_LEVEL,1)
++
++$(call force,CFG_NUVOTON_CRYPTO,y)
++
++supported-ta-targets = ta_arm64
++
++ifeq ($(CFG_ARM64_core),y)
++$(call force,CFG_WITH_LPAE,y)
++else
++$(call force,CFG_ARM32_core,y)
++endif
++
++CFG_WITH_STACK_CANARIES ?= y
++
++ifeq ($(PLATFORM_FLAVOR),MA35D1)
++# 2**1 = 2 cores per cluster
++$(call force,CFG_CORE_CLUSTER_SHIFT,1)
++endif
++
++include core/arch/arm/cpu/cortex-armv8-0.mk
+diff --git a/core/arch/arm/plat-nuvoton/main.c b/core/arch/arm/plat-nuvoton/main.c
+new file mode 100644
+index 0000000..b5dd6de
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/main.c
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: BSD-2-Clause
++/*
++ * Copyright (c) 2015, Linaro Limited
++ * Copyright (C) 2020, Nuvoton Technology Corporation
++ * Copyright (c) 2022, UWINGS Technologies.
++ */
++
++#include <console.h>
++#include <drivers/nuvoton_uart.h>
++#include <kernel/boot.h>
++#include <kernel/panic.h>
++#include <kernel/pm.h>
++#include <mm/core_memprot.h>
++#include <platform_config.h>
++#include <stdint.h>
++#include <tee/entry_std.h>
++#include <tee/entry_fast.h>
++#include <io.h>
++#include <tsi_cmd.h>
++
++#define LOAD_TSI_PATCH
++
++register_phys_mem_pgdir(MEM_AREA_IO_NSEC, UART0_BASE, UART0_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, SYS_BASE, SYS_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_BASE, TRNG_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, KS_BASE, KS_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, OTP_BASE, OTP_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, CRYPTO_BASE, CRYPTO_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TSI_BASE, TSI_REG_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, WHC1_BASE, WHC1_REG_SIZE);
++
++#ifdef LOAD_TSI_PATCH
++#include "tsi_patch.c"
++#endif
++
++static struct nuvoton_uart_data console_data;
++
++void console_init(void)
++{
++	nuvoton_uart_init(&console_data, CONSOLE_UART_BASE);
++	register_serial_console(&console_data.chip);
++}
++
++int ma35d1_tsi_init(void)
++{
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	int  ret;
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		/*
++		 * TSI enabled. Invoke TSI command and return here.
++		 */
++		uint32_t  version_code;
++
++		/* enable WHC1 clock */
++		io_write32(sys_base + 0x208,
++			   io_read32(sys_base + 0x208) | (1 << 5));
++
++		ret = TSI_Get_Version(&version_code);
++		if (ret == ST_SUCCESS)
++			return 0;   /* TSI is ready. */
++
++		while (1) {
++			ret = TSI_Get_Version(&version_code);
++			if (ret == ST_SUCCESS) {
++				EMSG("TSI F/W version: %x\n", version_code);
++				break;
++			}
++			if (ret == ST_WAIT_TSI_SYNC) {
++				EMSG("Wait TSI_Sync.\n");
++				TSI_Sync();
++			}
++		}
++	}
++
++#ifdef LOAD_TSI_PATCH
++	ret = TSI_Load_Image((uint32_t)virt_to_phys((void *)tsi_patch_image),
++				   	sizeof(tsi_patch_image));
++	if (ret == 0)
++		EMSG("Load TSI image successful.\n");
++	else
++		EMSG("Load TSI image failed!! %d\n", ret);
++#endif
++	return 0;
++}
+diff --git a/core/arch/arm/plat-nuvoton/platform_config.h b/core/arch/arm/plat-nuvoton/platform_config.h
+new file mode 100644
+index 0000000..9592b3f
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/platform_config.h
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2015, Linaro Limited
++ * Copyright (C) 2020, Nuvoton Technology Corporation
++ */
++
++#ifndef PLATFORM_CONFIG_H
++#define PLATFORM_CONFIG_H
++
++#include <mm/generic_ram_layout.h>
++
++/* Make stacks aligned to data cache line length */
++#define STACK_ALIGNMENT		64
++
++#ifdef ARM64
++#ifdef CFG_WITH_PAGER
++#error "Pager not supported for ARM64"
++#endif
++#endif /*ARM64*/
++
++#if defined(PLATFORM_FLAVOR_MA35D1)
++
++#define GIC_BASE		0x50801000UL
++#define GICC_OFFSET		0x2000
++#define GICD_OFFSET		0x1000
++
++#define CRYPTO_BASE		0x40300000UL
++#define CRYPTO_REG_SIZE		0x1000
++
++#define KS_BASE			0x40340000UL
++#define KS_REG_SIZE		0x1000
++
++#define OTP_BASE		0x40350000UL
++#define OTP_REG_SIZE		0x1000
++
++#define TSI_BASE		0x40360000UL
++#define TSI_REG_SIZE		0x1000
++
++#define SYS_BASE		0x40460000UL
++#define SYS_REG_SIZE		0x1000
++
++#define UART0_BASE		0x40700000UL
++#define UART0_REG_SIZE		0x1000
++
++#define TRNG_BASE		0x40B90000UL
++#define TRNG_REG_SIZE		0x1000
++
++#define WHC1_BASE		0x503B0000UL
++#define WHC1_REG_SIZE		0x1000
++
++#define CONSOLE_UART_BASE	UART0_BASE
++#define CONSOLE_BAUDRATE	115200
++#define CONSOLE_UART_CLK_IN_HZ	24000000
++
++#define DRAM0_BASE		0x80000000
++#define DRAM0_SIZE		0x40000000
++
++#define SYS_CHIPCFG		0x1F4
++#define TSIEN			(0x1 << 8)
++
++#define TSI_PLL_SETTING		0x808CA0	// 160 MHz
++
++#else
++#error "Unknown platform flavor"
++#endif
++
++#ifdef CFG_WITH_LPAE
++#define MAX_XLAT_TABLES		5
++#endif
++
++#endif /*PLATFORM_CONFIG_H*/
+diff --git a/core/arch/arm/plat-nuvoton/pta/crypto_pta.c b/core/arch/arm/plat-nuvoton/pta/crypto_pta.c
+new file mode 100644
+index 0000000..d02e60a
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/crypto_pta.c
+@@ -0,0 +1,838 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ * Copyright (c) 2022, UWINGS Technologies
++ */
++#include <crypto/crypto.h>
++#include <kernel/delay.h>
++#include <kernel/pseudo_ta.h>
++#include <kernel/spinlock.h>
++#include <kernel/timer.h>
++#include <kernel/tee_time.h>
++#include <mm/core_memprot.h>
++#include <tee/cache.h>
++#include <platform_config.h>
++#include <tsi_cmd.h>
++#include <io.h>
++#include <string.h>
++#include <crypto_pta.h>
++#include <crypto_pta_client.h>
++
++#define PTA_NAME "nvt_crypto.pta"
++
++#define RSA_BUSY_TIMEOUT    2000
++
++#define nu_write_reg(reg, val)	io_write32(crypto_base + (reg), (val))
++#define nu_read_reg(reg)	io_read32(crypto_base + (reg))
++
++__aligned(64) static uint32_t param_block[16];
++__aligned(64) static uint32_t tsi_buff[16];
++
++static inline uint32_t swab32(uint32_t x)
++{
++	return  ((x & (uint32_t)0x000000ffUL) << 24) |
++		((x & (uint32_t)0x0000ff00UL) <<  8) |
++		((x & (uint32_t)0x00ff0000UL) >>  8) |
++		((x & (uint32_t)0xff000000UL) >> 24);
++}
++
++#ifdef DEBUG_DUMP_CRYPTO_PTA
++static void dump_buff(char *str, uint8_t *buff, int len)
++{
++	int i;
++
++	EMSG("%s\n", str);
++	for (i = 0; i < len; i+= 16) {
++		EMSG("%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			buff[i], buff[i+1], buff[i+2], buff[i+3], buff[i+4], buff[i+5], buff[i+6], buff[i+7],
++			buff[i+8], buff[i+9], buff[i+10], buff[i+11], buff[i+12], buff[i+13], buff[i+14],
++			buff[i+15]);
++	}
++}
++#endif
++
++static bool is_timeout(TEE_Time *t_start, uint32_t timeout)
++{
++	TEE_Time  t_now;
++	uint32_t  time_elapsed;
++
++	tee_time_get_sys_time(&t_now);
++	time_elapsed = (t_now.seconds - t_start->seconds) * 1000 +
++			(int)t_now.millis - (int)t_start->millis;
++
++	if (time_elapsed > timeout)
++		return true;
++	return false;
++}
++
++static TEE_Result ma35d1_crypto_init(void)
++{
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t tsi_base = core_mmu_get_va(TSI_BASE, MEM_AREA_IO_SEC, TSI_REG_SIZE);
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN))
++		return ma35d1_tsi_init();
++
++	if ((io_read32(tsi_base + 0x210) & 0x7) != 0x2) {
++		do {
++			io_write32(tsi_base + 0x100, 0x59);
++			io_write32(tsi_base + 0x100, 0x16);
++			io_write32(tsi_base + 0x100, 0x88);
++		} while (io_read32(tsi_base + 0x100) == 0UL);
++
++		io_write32(tsi_base + 0x240, TSI_PLL_SETTING);
++
++		/* wait PLL stable */
++		while ((io_read32(tsi_base + 0x250) & 0x4) == 0)
++			;
++
++		/* Select TSI HCLK from PLL */
++		io_write32(tsi_base + 0x210, (io_read32(tsi_base +
++			   0x210) & ~0x7) | 0x2);
++	}
++
++	/* enable Crypto engine clock */
++	io_write32(tsi_base + 0x204, io_read32(tsi_base + 0x204) | (1 << 12));
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_open_session(uint32_t types,
++				   TEE_Param params[TEE_NUM_PARAMS])
++{
++	int   sid;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_VALUE_OUTPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++	if (TSI_Open_Session(params[0].value.a, &sid) != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	params[1].value.a = sid;
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_close_session(uint32_t types,
++				    TEE_Param params[TEE_NUM_PARAMS])
++{
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++	if (TSI_Close_Session(params[0].value.a,
++			      params[1].value.a) != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_aes_run(uint32_t types,
++			      TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  *reg_map;
++	uint32_t  reg_map_pa;    /* physical address of reg_map */
++	uint32_t  aes_ctl, aes_ksctl, sid, opmode;
++	int       keysz;
++	bool      is_gcm;
++	int       i, ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	reg_map = params[1].memref.buffer;
++	reg_map_pa = (uint32_t)virt_to_phys(reg_map);
++
++	sid = params[0].value.a;
++	aes_ctl = reg_map[AES_CTL / 4];
++	aes_ksctl = params[0].value.b;
++	opmode = (aes_ctl & AES_CTL_OPMODE_MASK) >> AES_CTL_OPMODE_OFFSET;
++	keysz = (aes_ctl & AES_CTL_KEYSZ_MASK) >> AES_CTL_KEYSZ_OFFSET;
++
++	if (opmode == AES_MODE_GCM || opmode == AES_MODE_CCM) {
++		is_gcm = true;
++		param_block[0] = reg_map[AES_GCM_IVCNT(0) / 4];
++		param_block[1] = reg_map[AES_GCM_ACNT(0) / 4];
++		param_block[2] = reg_map[AES_GCM_PCNT(0) / 4];
++		param_block[3] = reg_map[AES_SADDR / 4];
++		param_block[4] = reg_map[AES_DADDR / 4];
++	} else {
++		is_gcm = false;
++	}
++
++	cache_operation(TEE_CACHEFLUSH,
++			(void *)((uint64_t)reg_map + AES_IV(0)), 16);
++
++	ret = TSI_AES_Set_IV(sid, reg_map_pa + AES_IV(0));
++	if (ret != ST_SUCCESS) {
++		EMSG("TSI_AES_Set_IV failed - %d [%d]\n", ret, sid);
++		return TEE_ERROR_CRYPTO_FAIL;
++	}
++
++	cache_operation(TEE_CACHEFLUSH,
++			(void *)((uint64_t)reg_map + AES_KEY(0)), 32);
++
++	ret = TSI_AES_Set_Key(sid, keysz, reg_map_pa + AES_KEY(0));
++	if (ret != ST_SUCCESS) {
++		EMSG("TSI_AES_Set_Key failed %d\n", ret);
++		return TEE_ERROR_CRYPTO_FAIL;
++	}
++
++	/* TSI use FDBCK DMA, force swap here */
++	aes_ctl |= AES_CTL_KINSWAP | AES_CTL_KOUTSWAP;
++
++	ret = TSI_AES_Set_Mode(sid,                           /* sid      */
++			(aes_ctl & AES_CTL_KINSWAP) ? 1 : 0,  /* kinswap  */
++			0,                                    /* koutswap */
++			(aes_ctl & AES_CTL_INSWAP) ? 1 : 0,   /* inswap   */
++			(aes_ctl & AES_CTL_OUTSWAP) ? 1 : 0,  /* outswap  */
++			(aes_ctl & AES_CTL_SM4EN) ? 1 : 0,    /* sm4en    */
++			(aes_ctl & AES_CTL_ENCRPT) ? 1 : 0,   /* encrypt  */
++			opmode,                               /* mode     */
++			keysz,                                /* keysz    */
++			(aes_ksctl & AES_KSCTL_RSSRC_MASK) >>
++				AES_KSCTL_RSSRC_OFFSET,       /* ks       */
++			(aes_ksctl & AES_KSCTL_NUM_MASK) >>
++				AES_KSCTL_NUM_OFFSET          /* ksnum    */
++			);
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	if (is_gcm) {
++		int  flush_len;
++
++		flush_len = reg_map[AES_CNT / 4] +
++			    reg_map[AES_GCM_IVCNT(0) / 4] +
++			    reg_map[AES_GCM_ACNT(0) / 4] +
++			    reg_map[AES_GCM_PCNT(0) / 4];
++
++		cache_operation(TEE_CACHEFLUSH,
++				(void *)((uint64_t)reg_map[AES_SADDR / 4]),
++				flush_len);
++		cache_operation(TEE_CACHEINVALIDATE,
++				(void *)((uint64_t)reg_map[AES_DADDR / 4]),
++				flush_len);
++		cache_operation(TEE_CACHEFLUSH,
++				(void *)((uint64_t)param_block), 32);
++
++		ret = TSI_AES_GCM_Run(sid,
++				      aes_ctl & AES_CTL_DMALAST ? 1 : 0,
++				      reg_map[AES_CNT / 4],
++				      (uint32_t)virt_to_phys(param_block));
++	} else {
++		cache_operation(TEE_CACHEFLUSH,
++				(void *)((uint64_t)reg_map[AES_SADDR / 4]),
++				reg_map[AES_CNT / 4]);
++		cache_operation(TEE_CACHEINVALIDATE,
++				(void *)((uint64_t)reg_map[AES_DADDR / 4]),
++				reg_map[AES_CNT / 4]);
++		ret = TSI_AES_Run(sid,
++				  aes_ctl & AES_CTL_DMALAST ? 1 : 0,
++				  reg_map[AES_CNT / 4], reg_map[AES_SADDR / 4],
++				  reg_map[AES_DADDR / 4]);
++	}
++
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	cache_operation(TEE_CACHEINVALIDATE,
++			(void *)tsi_buff, sizeof(tsi_buff));
++
++	ret = TSI_Access_Feedback(sid, 1, 4, (uint32_t)virt_to_phys((void *)tsi_buff));
++	if (ret != 0) {
++		EMSG("TSI_Access_Feedback failed ret = %d\n", ret);
++		return TEE_ERROR_CRYPTO_FAIL;
++	}
++
++	if (aes_ctl & AES_CTL_KOUTSWAP) {
++		uint32_t  *fdbck = tsi_buff;
++
++		for (i = 0; i < 4; i++)
++			fdbck[i] = swab32(fdbck[i]);
++	}
++	memcpy(&reg_map[AES_FDBCK(0) / 4], tsi_buff, 16);
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_aes_run(uint32_t types,
++				  TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   crypto_base = core_mmu_get_va(CRYPTO_BASE, MEM_AREA_IO_SEC, CRYPTO_REG_SIZE);
++	uint32_t  *reg_map;
++	uint32_t  i;
++	TEE_Time  t_start;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	reg_map = params[1].memref.buffer;
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(AES_STS) & AES_STS_BUSY) ||
++	       (nu_read_reg(INTSTS) & (INTSTS_AESIF | INTSTS_AESEIF))) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++
++	nu_write_reg(AES_CTL, 0);
++	nu_write_reg(INTEN, nu_read_reg(INTEN) | (INTEN_AESIEN |
++					INTEN_AESEIEN));
++	nu_write_reg(INTSTS, (INTSTS_AESIF | INTSTS_AESEIF));
++
++	nu_write_reg(AES_KSCTL, params[0].value.b);
++
++	nu_write_reg(AES_GCM_IVCNT(0), reg_map[AES_GCM_IVCNT(0) / 4]);
++	nu_write_reg(AES_GCM_IVCNT(1), 0);
++	nu_write_reg(AES_GCM_ACNT(0), reg_map[AES_GCM_ACNT(0) / 4]);
++	nu_write_reg(AES_GCM_ACNT(1), 0);
++	nu_write_reg(AES_GCM_PCNT(0), reg_map[AES_GCM_PCNT(0) / 4]);
++	nu_write_reg(AES_GCM_PCNT(1), 0);
++
++	for (i = 0; i < 8; i++)
++		nu_write_reg(AES_KEY(i), reg_map[AES_KEY(i) / 4]);
++
++	for (i = 0; i < 4; i++)
++		nu_write_reg(AES_IV(i), reg_map[AES_IV(i) / 4]);
++
++	nu_write_reg(AES_SADDR, reg_map[AES_SADDR / 4]);
++	nu_write_reg(AES_DADDR, reg_map[AES_DADDR / 4]);
++	nu_write_reg(AES_CNT, reg_map[AES_CNT / 4]);
++
++	nu_write_reg(AES_CTL, reg_map[AES_CTL / 4]);
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(AES_STS) & AES_STS_BUSY) ||
++	       !(nu_read_reg(INTSTS) & (INTSTS_AESIF | INTSTS_AESEIF))) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_TIMEOUT;
++	}
++
++	nu_write_reg(INTSTS, (INTSTS_AESIF | INTSTS_AESEIF));
++
++	for (i = 0; i < 4; i++)
++		reg_map[AES_FDBCK(i) / 4] = nu_read_reg(AES_FDBCK(i));
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_sha_start(uint32_t types,
++				TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  hmac_ctl;
++	uint32_t  hmac_ksctl;
++	int       keylen, ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	hmac_ctl = params[1].value.a;
++	hmac_ksctl = params[1].value.b;
++	if (hmac_ctl & HMAC_CTL_HMACEN)
++		keylen = params[2].value.a;
++	else
++		keylen = 0;
++
++	ret = TSI_SHA_Start(params[0].value.a,                  /* sid      */
++			(hmac_ctl & HMAC_CTL_INSWAP) ? 1 : 0,   /* inswap   */
++			(hmac_ctl & HMAC_CTL_OUTSWAP) ? 1 : 0,  /* outswap  */
++			(hmac_ctl & SHA_MODE_SEL_MASK) >>
++					SHA_MODE_SEL_OFFSET,    /* mode_sel */
++			(hmac_ctl & HMAC_CTL_HMACEN) ? 1 : 0,   /* hmac     */
++			(hmac_ctl & HMAC_CTL_OPMODE_MASK) >>
++					HMAC_CTL_OPMODE_OFFSET, /* mode     */
++			keylen,                                 /* keylen   */
++			(hmac_ksctl >> 5) & 0x7,                /* ks       */
++			hmac_ksctl & 0x1f                       /* ks_num   */
++			);
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_sha_update(uint32_t types,
++				 TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  *reg_map;
++	uint32_t  ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++	reg_map = params[1].memref.buffer;
++
++	cache_operation(TEE_CACHEFLUSH,
++			(void *)((uint64_t)reg_map[HMAC_SADDR / 4]),
++			reg_map[HMAC_DMACNT / 4]);
++
++	ret = TSI_SHA_Update(params[0].value.a,      /* sid      */
++			reg_map[HMAC_DMACNT / 4],    /* data_cnt */
++			reg_map[HMAC_SADDR / 4]      /* src_addr */
++			);
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_sha_final(uint32_t types,
++				TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  *reg_map;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++	reg_map = params[1].memref.buffer;
++
++	cache_operation(TEE_CACHEINVALIDATE,
++			(void *)tsi_buff, sizeof(tsi_buff));
++
++	ret = TSI_SHA_Finish(params[0].value.a,                   /* sid       */
++			params[0].value.b / 4,                    /* wcnt      */
++			reg_map[HMAC_DMACNT / 4],                 /* data_cnt  */
++			reg_map[HMAC_SADDR / 4],                  /* src_addr  */
++			(uint32_t)virt_to_phys((void *)tsi_buff)  /* dest_addr */
++			);
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	memcpy(&reg_map[HMAC_DGST(0) / 4], tsi_buff,  64);
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_sha_update(uint32_t types,
++				     TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   crypto_base = core_mmu_get_va(CRYPTO_BASE, MEM_AREA_IO_SEC, CRYPTO_REG_SIZE);
++	uint32_t  *reg_map;
++	uint32_t  i;
++	TEE_Time  t_start;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	reg_map = params[1].memref.buffer;
++
++	tee_time_get_sys_time(&t_start);
++	while (nu_read_reg(HMAC_STS) & HMAC_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++
++	nu_write_reg(INTEN, nu_read_reg(INTEN) | (INTEN_HMACIEN |
++					INTEN_HMACEIEN));
++	nu_write_reg(INTSTS, (INTSTS_HMACIF | INTSTS_HMACEIF));
++
++	nu_write_reg(HMAC_KSCTL, reg_map[HMAC_KSCTL / 4]);
++	nu_write_reg(HMAC_KEYCNT, reg_map[HMAC_KEYCNT / 4]);
++	nu_write_reg(HMAC_SADDR, reg_map[HMAC_SADDR / 4]);
++	nu_write_reg(HMAC_DMACNT, reg_map[HMAC_DMACNT / 4]);
++	nu_write_reg(HMAC_FBADDR, reg_map[HMAC_FBADDR / 4]);
++
++	nu_write_reg(HMAC_CTL, reg_map[HMAC_CTL / 4]);
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(HMAC_STS) & HMAC_STS_BUSY) ||
++	       !(nu_read_reg(INTSTS) & (INTSTS_HMACIF | INTSTS_HMACEIF))) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++	nu_write_reg(INTSTS, (INTSTS_HMACIF | INTSTS_HMACEIF));
++
++	if (reg_map[HMAC_CTL / 4] & HMAC_CTL_DMALAST) {
++		for (i = 0; i < 16; i++)
++			reg_map[HMAC_DGST(i) / 4] = nu_read_reg(HMAC_DGST(i));
++	}
++	return TEE_SUCCESS;
++}
++
++static char  ch2hex(char ch)
++{
++	if (ch <= '9')
++		ch = ch - '0';
++	else if ((ch <= 'z') && (ch >= 'a'))
++		ch = ch - 'a' + 10U;
++	else
++		ch = ch - 'A' + 10U;
++	return ch;
++}
++
++static void Hex2Reg(char input[], uint32_t reg[])
++{
++	char      hex;
++	int       si, ri;
++	uint32_t  i, val32;
++
++	si = (int)strlen(input) - 1;
++	ri = 0;
++
++	while (si >= 0) {
++		val32 = 0UL;
++		for (i = 0UL; (i < 8UL) && (si >= 0); i++) {
++			hex = ch2hex(input[si]);
++			val32 |= (uint32_t)hex << (i * 4UL);
++			si--;
++		}
++		reg[ri++] = val32;
++	}
++}
++
++static TEE_Result tsi_ecc_pmul(uint32_t types,
++			       TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  *reg_map;
++	uint32_t  reg_map_pa;
++	uint32_t  ecc_ksctl, ecc_ksxy;
++	int       rssrc, msel, sps;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	reg_map = params[1].memref.buffer;
++	reg_map_pa = (uint32_t)virt_to_phys(reg_map);
++
++	ecc_ksctl = reg_map[ECC_KSCTL / 4];
++	ecc_ksxy = reg_map[ECC_KSXY / 4];
++		reg_map_pa = (uint32_t)virt_to_phys(reg_map);
++
++	if (ecc_ksctl & ECC_KSCTL_RSRCK) {
++		rssrc = (ecc_ksctl & ECC_KSCTL_RSSRCK_MASK) >> ECC_KSCTL_RSSRCK_OFFSET;
++		if (rssrc == 0)
++			msel = 2; /* Key is from KS SRAM */
++		else
++			msel = 1; /* Key is from KS OTP */
++	} else {
++		msel = 3; /* Key is from parameter block */
++	}
++
++	if (ecc_ksxy & ECC_KSXY_RSRCXY) {
++		sps = (ecc_ksxy & ECC_KSXY_RSSRCX_MASK) >> ECC_KSXY_RSSRCX_OFFSET;
++		if (sps == 0)
++			sps = 2; /* XY key from KS SRAM */
++		else
++			sps = 1; /* XY key from KS OTP */
++	} else {
++		sps = 3; /* XY key from parameter block */
++	}
++
++	cache_operation(TEE_CACHEFLUSH, (void *)((uint64_t)reg_map +
++				params[2].value.a), 576 * 3);
++
++	cache_operation(TEE_CACHEINVALIDATE, (void *)((uint64_t)reg_map +
++				params[2].value.b), 576 * 2);
++
++	ret = TSI_ECC_Multiply(params[0].value.a,             /* curve_id   */
++			(ecc_ksctl & ECC_KSCTL_ECDH) ? 1 : 0, /* type       */
++			msel,                                 /* msel       */
++			sps,                                  /* sps        */
++			(ecc_ksctl & ECC_KSCTL_NUMK_MASK) >>
++				ECC_KSCTL_NUMK_OFFSET,        /* m_knum     */
++			(ecc_ksxy & ECC_KSXY_NUMX_MASK) >>
++				ECC_KSXY_NUMX_OFFSET,         /* x_knum     */
++			(ecc_ksxy & ECC_KSXY_NUMY_MASK) >>
++				ECC_KSXY_NUMY_OFFSET,         /* y_knum     */
++			reg_map_pa + params[2].value.a,       /* param_addr */
++			reg_map_pa + params[2].value.b        /* dest_addr  */
++			);
++	if (ret != ST_SUCCESS)
++		return TEE_ERROR_CRYPTO_FAIL;
++
++	Hex2Reg((char *)&reg_map[params[2].value.b / 4],
++		(uint32_t *)&reg_map[ECC_X1(0) / 4]);
++
++	Hex2Reg((char *)&reg_map[(params[2].value.b + 0x240) / 4],
++		(uint32_t *)&reg_map[ECC_Y1(0) / 4]);
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ecc_pmul(uint32_t types,
++				   TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   crypto_base = core_mmu_get_va(CRYPTO_BASE, MEM_AREA_IO_SEC, CRYPTO_REG_SIZE);
++	uint32_t  *reg_map;
++	uint32_t  i;
++	TEE_Time  t_start;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	reg_map = params[1].memref.buffer;
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(ECC_STS) & ECC_STS_BUSY) ||
++	       (nu_read_reg(INTSTS) & (INTSTS_ECCIF | INTSTS_ECCEIF))) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++
++	nu_write_reg(ECC_CTL, 0);
++	nu_write_reg(INTEN, nu_read_reg(INTEN) | (INTEN_ECCIEN |
++					INTEN_ECCEIEN));
++	nu_write_reg(INTSTS, (INTSTS_ECCIF | INTSTS_ECCEIF));
++
++	nu_write_reg(ECC_KSCTL, reg_map[ECC_KSCTL / 4]);
++	nu_write_reg(ECC_KSXY, reg_map[ECC_KSXY / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_X1(i), reg_map[ECC_X1(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_Y1(i), reg_map[ECC_Y1(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_X2(i), reg_map[ECC_X2(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_Y2(i), reg_map[ECC_Y2(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_A(i), reg_map[ECC_A(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_B(i), reg_map[ECC_B(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_N(i), reg_map[ECC_N(i) / 4]);
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		nu_write_reg(ECC_K(i), reg_map[ECC_K(i) / 4]);
++
++	nu_write_reg(ECC_CTL, reg_map[ECC_CTL / 4]);
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(ECC_STS) & ECC_STS_BUSY) ||
++	       !(nu_read_reg(INTSTS) & (INTSTS_ECCIF | INTSTS_ECCEIF))) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++
++	nu_write_reg(INTSTS, (INTSTS_ECCIF | INTSTS_ECCEIF));
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		reg_map[ECC_X1(i) / 4] = nu_read_reg(ECC_X1(i));
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		reg_map[ECC_Y1(i) / 4] = nu_read_reg(ECC_Y1(i));
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		reg_map[ECC_X2(i) / 4] = nu_read_reg(ECC_X2(i));
++
++	for (i = 0; i < ECC_KEY_WCNT; i++)
++		reg_map[ECC_Y2(i) / 4] = nu_read_reg(ECC_Y2(i));
++
++	return TEE_SUCCESS;
++}
++
++static TEE_Result tsi_rsa_run(uint32_t types,
++			      TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t  *reg_map;
++	uint32_t  reg_map_pa;
++	uint32_t  rsa_ctl, rsa_ksctl;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++	reg_map = params[1].memref.buffer;
++	reg_map_pa = (uint32_t)virt_to_phys(reg_map);
++
++	rsa_ctl = reg_map[RSA_CTL / 4];
++	rsa_ksctl = reg_map[RSA_KSCTL / 4];
++
++	reg_map[1536] = reg_map[RSA_KSSTS0 / 4];
++	reg_map[1537] = reg_map[RSA_KSSTS1 / 4];
++	reg_map[1538] = reg_map[RSA_KSCTL / 4];
++
++	cache_operation(TEE_CACHEFLUSH,
++			(void *)(&reg_map[0x1000 / 4]), 0x2000);
++	cache_operation(TEE_CACHEINVALIDATE,
++			(void *)(&reg_map[0x3000 / 4]), 0x1000);
++
++	ret = TSI_RSA_Exp_Mod((rsa_ctl & RSA_CTL_KEYLENG_MASK) >>
++			RSA_CTL_KEYLENG_OFFSET,         /* rsa_len    */
++		(rsa_ctl & RSA_CTL_CRT) ? 1 : 0,	/* crt        */
++		(rsa_ksctl & RSA_KSCTL_RSRC) ? 2 : 3,   /* esel       */
++		(rsa_ksctl & RSA_KSCTL_NUM_MASK) >>
++			RSA_KSCTL_NUM_OFFSET,           /* e_knum     */
++		reg_map_pa + 0x1000,                    /* param_addr */
++		reg_map_pa + 0x3000                     /* dest_addr  */
++		);
++	if (ret != ST_SUCCESS) {
++		EMSG("TSI_RSA_Exp_Mod error return: 0x%x\n", ret);
++		return TEE_ERROR_CRYPTO_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_rsa_run(uint32_t types,
++				  TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   crypto_base = core_mmu_get_va(CRYPTO_BASE, MEM_AREA_IO_SEC, CRYPTO_REG_SIZE);
++	uint32_t  *reg_map;
++	TEE_Time  t_start;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	tee_time_get_sys_time(&t_start);
++	while (nu_read_reg(RSA_STS) & RSA_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++
++	reg_map = params[1].memref.buffer;
++
++	nu_write_reg(RSA_CTL, 0);
++	nu_write_reg(INTSTS, (INTSTS_RSAIF | INTSTS_RSAEIF));
++
++	nu_write_reg(RSA_KSCTL, reg_map[RSA_KSCTL / 4]);
++	nu_write_reg(RSA_KSSTS0, reg_map[RSA_KSSTS0 / 4]);
++	nu_write_reg(RSA_KSSTS1, reg_map[RSA_KSSTS1 / 4]);
++
++	nu_write_reg(RSA_SADDR0, reg_map[RSA_SADDR0 / 4]);
++	nu_write_reg(RSA_SADDR1, reg_map[RSA_SADDR1 / 4]);
++	nu_write_reg(RSA_SADDR2, reg_map[RSA_SADDR2 / 4]);
++	nu_write_reg(RSA_SADDR3, reg_map[RSA_SADDR3 / 4]);
++	nu_write_reg(RSA_SADDR4, reg_map[RSA_SADDR4 / 4]);
++	nu_write_reg(RSA_DADDR, reg_map[RSA_DADDR / 4]);
++	nu_write_reg(RSA_MADDR0, reg_map[RSA_MADDR0 / 4]);
++	nu_write_reg(RSA_MADDR1, reg_map[RSA_MADDR1 / 4]);
++	nu_write_reg(RSA_MADDR2, reg_map[RSA_MADDR2 / 4]);
++	nu_write_reg(RSA_MADDR3, reg_map[RSA_MADDR3 / 4]);
++	nu_write_reg(RSA_MADDR4, reg_map[RSA_MADDR4 / 4]);
++	nu_write_reg(RSA_MADDR5, reg_map[RSA_MADDR5 / 4]);
++	nu_write_reg(RSA_MADDR6, reg_map[RSA_MADDR6 / 4]);
++
++	nu_write_reg(RSA_CTL, reg_map[RSA_CTL / 4]);
++
++	tee_time_get_sys_time(&t_start);
++	while ((nu_read_reg(RSA_STS) & RSA_STS_BUSY) ||
++	       (nu_read_reg(RSA_CTL) & RSA_CTL_START)) {
++		if (is_timeout(&t_start, RSA_BUSY_TIMEOUT) == true)
++			return TEE_ERROR_CRYPTO_BUSY;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result invoke_command(void *pSessionContext __unused,
++				 uint32_t nCommandID, uint32_t nParamTypes,
++				 TEE_Param pParams[TEE_NUM_PARAMS])
++{
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	int   tsi_en;
++
++	FMSG("command entry point for pseudo-TA \"%s\"", PTA_NAME);
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN))
++		tsi_en = 1;
++	else
++		tsi_en = 0;
++
++	switch (nCommandID) {
++	case PTA_CMD_CRYPTO_INIT:
++		return ma35d1_crypto_init();
++
++	case PTA_CMD_CRYPTO_OPEN_SESSION:
++		if (tsi_en)
++			return tsi_open_session(nParamTypes, pParams);
++		else
++			return TEE_SUCCESS;
++
++	case PTA_CMD_CRYPTO_CLOSE_SESSION:
++		if (tsi_en)
++			return tsi_close_session(nParamTypes, pParams);
++		else
++			return TEE_SUCCESS;
++
++	case PTA_CMD_CRYPTO_AES_RUN:
++		if (tsi_en)
++			return tsi_aes_run(nParamTypes, pParams);
++		else
++			return ma35d1_aes_run(nParamTypes, pParams);
++
++	case PTA_CMD_CRYPTO_SHA_START:
++		if (tsi_en)
++			return tsi_sha_start(nParamTypes, pParams);
++		else
++			return TEE_SUCCESS;
++
++	case PTA_CMD_CRYPTO_SHA_UPDATE:
++		if (tsi_en)
++			return tsi_sha_update(nParamTypes, pParams);
++		else
++			return ma35d1_sha_update(nParamTypes, pParams);
++
++	case PTA_CMD_CRYPTO_SHA_FINAL:
++		if (tsi_en)
++			return tsi_sha_final(nParamTypes, pParams);
++		else
++			return ma35d1_sha_update(nParamTypes, pParams);
++
++	case PTA_CMD_CRYPTO_ECC_PMUL:
++		if (tsi_en)
++			return tsi_ecc_pmul(nParamTypes, pParams);
++		else
++			return ma35d1_ecc_pmul(nParamTypes, pParams);
++
++	case PTA_CMD_CRYPTO_RSA_RUN:
++		if (tsi_en)
++			return tsi_rsa_run(nParamTypes, pParams);
++		else
++			return ma35d1_rsa_run(nParamTypes, pParams);
++
++	default:
++		break;
++	}
++
++	return TEE_ERROR_NOT_IMPLEMENTED;
++}
++
++pseudo_ta_register(.uuid = PTA_CRYPTO_UUID, .name = PTA_NAME,
++		   .flags = PTA_DEFAULT_FLAGS | TA_FLAG_DEVICE_ENUM,
++		   .invoke_command_entry_point = invoke_command);
+diff --git a/core/arch/arm/plat-nuvoton/pta/crypto_pta.h b/core/arch/arm/plat-nuvoton/pta/crypto_pta.h
+new file mode 100644
+index 0000000..ae236c7
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/crypto_pta.h
+@@ -0,0 +1,295 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++#ifndef __CRYPTO_PTA_H
++#define __CRYPTO_PTA_H
++
++#define INTEN			0x000
++#define INTEN_AESIEN			(0x1 << 0)
++#define INTEN_AESEIEN			(0x1 << 1)
++#define INTEN_PRNGIEN			(0x1 << 16)
++#define INTEN_ECCIEN			(0x1 << 22)
++#define INTEN_ECCEIEN			(0x1 << 23)
++#define INTEN_HMACIEN			(0x1 << 24)
++#define INTEN_HMACEIEN			(0x1 << 25)
++#define INTEN_RSAIEN			(0x1 << 30)
++#define INTEN_RSAEIEN			(0x1 << 31)
++#define INTSTS			0x004
++#define INTSTS_AESIF			(0x1 << 0)
++#define INTSTS_AESEIF			(0x1 << 1)
++#define INTSTS_PRNGIF			(0x1 << 16)
++#define INTSTS_ECCIF			(0x1 << 22)
++#define INTSTS_ECCEIF			(0x1 << 23)
++#define INTSTS_HMACIF			(0x1 << 24)
++#define INTSTS_HMACEIF			(0x1 << 25)
++#define INTSTS_RSAIF			(0x1 << 30)
++#define INTSTS_RSAEIF			(0x1 << 31)
++
++#define PRNG_CTL		0x008
++#define PRNG_CTL_START			(0x1 << 0)
++#define PRNG_CTL_SEEDRLD		(0x1 << 1)
++#define PRNG_CTL_KEYSZ_OFFSET		(2)
++#define PRNG_CTL_KEYSZ_MASK		(0xf << 2)
++#define PRNG_CTL_BUSY			(0x1 << 8)
++#define PRNG_CTL_SEEDSRC		(0x1 << 16)
++#define PRNG_SEED		0x00C
++#define PRNG_KEY(x)		(0x010 + ((x) * 0x04))
++
++#define AES_FDBCK(x)		(0x050 + ((x) * 0x04))
++#define AES_GCM_IVCNT(x)	(0x080 + ((x) * 0x04))
++#define AES_GCM_ACNT(x)		(0x088 + ((x) * 0x04))
++#define AES_GCM_PCNT(x)		(0x090 + ((x) * 0x04))
++#define AES_FBADDR		0x0A0
++#define AES_CTL			0x100
++#define AES_CTL_START			(0x1 << 0)
++#define AES_CTL_STOP			(0x1 << 1)
++#define AES_CTL_KEYSZ_OFFSET		2
++#define AES_CTL_KEYSZ_MASK		(0x3 << 2)
++#define AES_CTL_DMALAST			(0x1 << 5)
++#define AES_CTL_DMACSCAD		(0x1 << 6)
++#define AES_CTL_DMAEN			(0x1 << 7)
++#define AES_CTL_OPMODE_OFFSET		8
++#define AES_CTL_OPMODE_MASK		(0xff << 8)
++#define AES_CTL_ENCRPT			(0x1 << 16)
++#define AES_CTL_SM4EN			(0x1 << 17)
++#define AES_CTL_FBIN			(0x1 << 20)
++#define AES_CTL_FBOUT			(0x1 << 21)
++#define AES_CTL_OUTSWAP			(0x1 << 22)
++#define AES_CTL_INSWAP			(0x1 << 23)
++#define AES_CTL_KOUTSWAP		(0x1 << 24)
++#define AES_CTL_KINSWAP			(0x1 << 25)
++#define AES_STS			0x104
++#define AES_STS_BUSY			(0x1 << 0)
++#define AES_STS_INBUFEMPTY		(0x1 << 8)
++#define AES_STS_INBUFFULL		(0x1 << 9)
++#define AES_STS_INBUFERR		(0x1 << 10)
++#define AES_STS_CNTERR			(0x1 << 12)
++#define AES_STS_OUTBUFEMPTY		(0x1 << 16)
++#define AES_STS_OUTBUFFULL		(0x1 << 17)
++#define AES_STS_OUTBUFERR		(0x1 << 18)
++#define AES_STS_BUSERR			(0x1 << 20)
++#define AES_STS_KSERR			(0x1 << 21)
++#define AES_DATIN		0x108
++#define AES_DATOUT		0x10C
++#define AES_KEY(x)		(0x110 + ((x) * 0x04))
++#define AES_IV(x)		(0x130 + ((x) * 0x04))
++#define AES_SADDR		0x140
++#define AES_DADDR		0x144
++#define AES_CNT			0x148
++
++#define HMAC_CTL		0x300
++#define HMAC_CTL_START			(0x1 << 0)
++#define HMAC_CTL_STOP			(0x1 << 1)
++#define HMAC_CTL_DMAFIRST		(0x1 << 4)
++#define HMAC_CTL_DMALAST		(0x1 << 5)
++#define HMAC_CTL_DMACSCAD		(0x1 << 6)
++#define HMAC_CTL_DMAEN			(0x1 << 7)
++#define HMAC_CTL_OPMODE_OFFSET		8
++#define HMAC_CTL_OPMODE_MASK		(0x7 << 8)
++#define HMAC_CTL_HMACEN			(0x1 << 11)
++#define HMAC_CTL_SHA3EN			(0x1 << 12)
++#define HMAC_CTL_SM3EN			(0x1 << 13)
++#define HMAC_CTL_MD5EN			(0x1 << 14)
++#define HMAC_CTL_FBIN			(0x1 << 20)
++#define HMAC_CTL_FBOUT			(0x1 << 21)
++#define HMAC_CTL_OUTSWAP		(0x1 << 22)
++#define HMAC_CTL_INSWAP			(0x1 << 23)
++#define HMAC_CTL_NEXTDGST		(0x1 << 24)
++#define HMAC_CTL_FINISHDGST		(0x1 << 25)
++#define HMAC_STS		0x304
++#define HMAC_STS_BUSY			(0x1 << 0)
++#define HMAC_STS_DMABUSY		(0x1 << 1)
++#define HMAC_STS_SHAKEBUSY		(0x1 << 2)
++#define HMAC_STS_DMAERR			(0x1 << 8)
++#define HMAC_STS_KSERR			(0x1 << 9)
++#define HMAC_STS_DATINREQ		(0x1 << 16)
++#define HMAC_DGST(x)		(0x308 + ((x) * 0x04))
++#define HMAC_KEYCNT		0x348
++#define HMAC_SADDR		0x34C
++#define HMAC_DMACNT		0x350
++#define HMAC_DATIN		0x354
++#define HMAC_FDBCK(x)		(0x358 + ((x) * 0x04))
++#define HMAC_FDBCK_WCNT			88
++#define HMAC_FBADDR		0x4FC
++#define HMAC_SHAKEDGST(x)	(0x500 + ((x) * 0x04))
++#define HMAC_SHAKEDGST_WCNT		42
++
++#define ECC_CTL			0x800
++#define ECC_CTL_START			(0x1 << 0)
++#define ECC_CTL_STOP			(0x1 << 1)
++#define ECC_CTL_ECDSAS			(0x1 << 4)
++#define ECC_CTL_ECDSAR			(0x1 << 5)
++#define ECC_CTL_DMAEN			(0x1 << 7)
++#define ECC_CTL_FSEL			(0x1 << 8)
++#define ECC_CTL_ECCOP_OFFSET		9
++#define ECC_CTL_ECCOP_MASK		(0x3 << 9)
++#define ECC_CTL_MODOP_OFFSET		11
++#define ECC_CTL_MODOP_MASK		(0x3 << 9)
++#define ECC_CTL_CSEL			(0x1 << 13)
++#define ECC_CTL_SCAP			(0x1 << 14)
++#define ECC_CTL_LDAP1			(0x1 << 16)
++#define ECC_CTL_LDAP2			(0x1 << 17)
++#define ECC_CTL_LDA			(0x1 << 18)
++#define ECC_CTL_LDB			(0x1 << 19)
++#define ECC_CTL_LDN			(0x1 << 20)
++#define ECC_CTL_LDK			(0x1 << 21)
++#define ECC_CTL_CURVEM_OFFSET		22
++#define ECC_CTL_CURVEM_MASK		(0x3ff << 22)
++#define ECC_STS			0x804
++#define ECC_STS_BUSY			(0x1 << 0)
++#define ECC_STS_DMABUSY			(0x1 << 1)
++#define ECC_STS_BUSERR			(0x1 << 16)
++#define ECC_STS_KSERR			(0x1 << 17)
++#define HMAC_DGST(x)		(0x308 + ((x) * 0x04))
++#define ECC_X1(x)		(0x808 + ((x) * 0x04))
++#define ECC_Y1(x)		(0x850 + ((x) * 0x04))
++#define ECC_X2(x)		(0x898 + ((x) * 0x04))
++#define ECC_Y2(x)		(0x8E0 + ((x) * 0x04))
++#define ECC_A(x)		(0x928 + ((x) * 0x04))
++#define ECC_B(x)		(0x970 + ((x) * 0x04))
++#define ECC_N(x)		(0x9B8 + ((x) * 0x04))
++#define ECC_K(x)		(0xA00 + ((x) * 0x04))
++#define ECC_KEY_WCNT			18
++#define ECC_SADDR		0xA48
++#define ECC_DADDR		0xA4C
++#define ECC_STARTREG		0xA50
++#define ECC_WORDCNT		0xA54
++
++#define RSA_CTL			0xB00
++#define RSA_CTL_START			(0x1 << 0)
++#define RSA_CTL_STOP			(0x1 << 1)
++#define RSA_CTL_CRT			(0x1 << 2)
++#define RSA_CTL_CRTBYP			(0x1 << 3)
++#define RSA_CTL_KEYLENG_OFFSET		4
++#define RSA_CTL_KEYLENG_MASK		(0x3 << 4)
++#define RSA_CTL_SCAP			(0x1 << 8)
++#define RSA_STS			0xB04
++#define RSA_STS_BUSY			(0x1 << 0)
++#define RSA_STS_DMABUSY			(0x1 << 1)
++#define RSA_STS_BUSERR			(0x1 << 16)
++#define RSA_STS_CTLERR			(0x1 << 17)
++#define RSA_STS_KSERR			(0x1 << 18)
++#define RSA_SADDR0		0xB08
++#define RSA_SADDR1		0xB0C
++#define RSA_SADDR2		0xB10
++#define RSA_SADDR3		0xB14
++#define RSA_SADDR4		0xB18
++#define RSA_DADDR		0xB1C
++#define RSA_MADDR0		0xB20
++#define RSA_MADDR1		0xB24
++#define RSA_MADDR2		0xB28
++#define RSA_MADDR3		0xB2C
++#define RSA_MADDR4		0xB30
++#define RSA_MADDR5		0xB34
++#define RSA_MADDR6		0xB38
++
++#define PRNG_KSCTL		0xF00
++#define PRNG_KSCTL_NUM_OFFSET		0
++#define PRNG_KSCTL_NUM_MASK		(0x1f << 0)
++#define PRNG_KSCTL_KEYSRC		(0x1 << 8)
++#define PRNG_KSCTL_TRUST		(0x1 << 16)
++#define PRNG_KSCTL_PRIV			(0x1 << 18)
++#define PRNG_KSCTL_ECDH			(0x1 << 19)
++#define PRNG_KSCTL_ECDSA		(0x1 << 20)
++#define PRNG_KSCTL_WDST			(0x1 << 21)
++#define PRNG_KSCTL_WSDST_OFFSET		22
++#define PRNG_KSCTL_WSDST_MASK		(0x3 << 22)
++#define PRNG_KSCTL_OWNER_OFFSET		24
++#define PRNG_KSCTL_OWNER_MASK		(0x7 << 24)
++#define PRNG_KSSTS		0xF04
++#define PRNG_KSSTS_NUM_OFFSET		0
++#define PRNG_KSSTS_NUM_MASK		(0x1f << 0)
++#define PRNG_KSSTS_KCTLERR		(0x1 << 16)
++
++#define AES_KSCTL		0xF10
++#define AES_KSCTL_NUM_OFFSET		0
++#define AES_KSCTL_NUM_MASK		(0x1f << 0)
++#define AES_KSCTL_RSRC			(0x1 << 5)
++#define AES_KSCTL_RSSRC_OFFSET		6
++#define AES_KSCTL_RSSRC_MASK		(0x3 << 6)
++
++#define HMAC_KSCTL		0xF30
++#define HMAC_KSCTL_NUM_OFFSET		0
++#define HMAC_KSCTL_NUM_MASK		(0x1f << 0)
++#define HMAC_KSCTL_RSRC			(0x1 << 5)
++#define HMAC_KSCTL_RSSRC_OFFSET		6
++#define HMAC_KSCTL_RSSRC_MASK		(0x3 << 6)
++
++#define ECC_KSCTL		0xF40
++#define ECC_KSCTL_NUMK_OFFSET		0
++#define ECC_KSCTL_NUMK_MASK		(0x1f << 0)
++#define ECC_KSCTL_RSRCK			(0x1 << 5)
++#define ECC_KSCTL_RSSRCK_OFFSET		6
++#define ECC_KSCTL_RSSRCK_MASK		(0x3 << 6)
++#define ECC_KSCTL_ECDH			(0x1 << 14)
++#define ECC_KSCTL_TRUST			(0x1 << 16)
++#define ECC_KSCTL_PRIV			(0x1 << 18)
++#define ECC_KSCTL_XY			(0x1 << 20)
++#define ECC_KSCTL_WDST			(0x1 << 21)
++#define ECC_KSCTL_WSDST_OFFSET		22
++#define ECC_KSCTL_WSDST_MASK		(0x3 << 22)
++#define ECC_KSCTL_OWNER_OFFSET		24
++#define ECC_KSCTL_OWNER_MASK		(0x7 << 24)
++#define ECC_KSSTS		0xF44
++#define ECC_KSSTS_NUM_OFFSET		0
++#define ECC_KSSTS_NUM_MASK		(0x1f << 0)
++#define ECC_KSXY			0xF48
++#define ECC_KSXY_NUMX_OFFSET		0
++#define ECC_KSXY_NUMX_MASK		(0x1f << 0)
++#define ECC_KSXY_RSRCXY			(0x1 << 5)
++#define ECC_KSXY_RSSRCX_OFFSET		6
++#define ECC_KSXY_RSSRCX_MASK		(0x3 << 6)
++#define ECC_KSXY_NUMY_OFFSET		8
++#define ECC_KSXY_NUMY_MASK		(0x1f << 8)
++#define ECC_KSXY_RSSRCY_OFFSET		14
++#define ECC_KSXY_RSSRCY_MASK		(0x3 << 14)
++
++#define RSA_KSCTL		0xF50
++#define RSA_KSCTL_NUM_OFFSET		0
++#define RSA_KSCTL_NUM_MASK		(0x1f << 0)
++#define RSA_KSCTL_RSRC			(0x1 << 5)
++#define RSA_KSCTL_RSSRC_OFFSET		6
++#define RSA_KSCTL_RSSRC_MASK		(0x3 << 6)
++#define RSA_KSCTL_BKNUM_OFFSET		8
++#define RSA_KSCTL_BKNUM_MASK		(0x1f << 8)
++#define RSA_KSSTS0		0xF54
++#define RSA_KSSTS0_NUM0_OFFSET		0
++#define RSA_KSSTS0_NUM0_MASK		(0x1f << 0)
++#define RSA_KSSTS0_NUM1_OFFSET		8
++#define RSA_KSSTS0_NUM1_MASK		(0x1f << 8)
++#define RSA_KSSTS0_NUM2_OFFSET		16
++#define RSA_KSSTS0_NUM2_MASK		(0x1f << 16)
++#define RSA_KSSTS0_NUM3_OFFSET		24
++#define RSA_KSSTS0_NUM3_MASK		(0x1f << 24)
++#define RSA_KSSTS1		0xF58
++#define RSA_KSSTS1_NUM4_OFFSET		0
++#define RSA_KSSTS1_NUM4_MASK		(0x1f << 0)
++#define RSA_KSSTS1_NUM5_OFFSET		8
++#define RSA_KSSTS1_NUM5_MASK		(0x1f << 8)
++#define RSA_KSSTS1_NUM6_OFFSET		16
++#define RSA_KSSTS1_NUM6_MASK		(0x1f << 16)
++#define RSA_KSSTS1_NUM7_OFFSET		24
++#define RSA_KSSTS1_NUM7_MASK		(0x1f << 24)
++
++#define AES_MODE_ECB			0UL
++#define AES_MODE_CBC			1UL
++#define AES_MODE_CFB			2UL
++#define AES_MODE_OFB			3UL
++#define AES_MODE_CTR			4UL
++#define AES_MODE_CBC_CS1		0x10UL
++#define AES_MODE_CBC_CS2		0x11UL
++#define AES_MODE_CBC_CS3		0x12UL
++#define AES_MODE_GCM			0x20UL
++#define AES_MODE_GHASH			0x21UL
++#define AES_MODE_CCM			0x22UL
++
++#define SHA_MODE_SEL_OFFSET		12
++#define SHA_MODE_SEL_MASK		(0x7 << 12)
++#define SHA_MODE_SEL_SHA1		0UL
++#define SHA_MODE_SEL_SHA2		0UL
++#define SHA_MODE_SEL_SHA3		1UL
++#define SHA_MODE_SEL_SM3		2UL
++#define SHA_MODE_SEL_MD5		4UL
++
++#endif /* __CRYPTO_PTA_H */
+diff --git a/core/arch/arm/plat-nuvoton/pta/crypto_pta_client.h b/core/arch/arm/plat-nuvoton/pta/crypto_pta_client.h
+new file mode 100644
+index 0000000..deeefbc
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/crypto_pta_client.h
+@@ -0,0 +1,162 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++#ifndef __CRYPTO_PTA_CLIENT_H
++#define __CRYPTO_PTA_CLIENT_H
++
++#define PTA_CRYPTO_UUID { 0x61d3c750, 0x9e72, 0x46b6, \
++		{ 0x85, 0x7c, 0x46, 0xfa, 0x51, 0x27, 0x32, 0xac } }
++
++#define TEE_ERROR_CRYPTO_BUSY		0x00000001
++#define TEE_ERROR_CRYPTO_FAIL		0x00000002
++#define TEE_ERROR_CRYPTO_INVALID	0x00000003
++#define TEE_ERROR_CRYPTO_TIMEOUT	0x00000004
++
++/*
++ * PTA_CMD_CRYPTO_INIT - Initialize Crypto Engine
++ *
++ * param[0] unused
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_BAD_PARAMETERS - Incorrect input param
++ * TEE_ERROR_CRYPTO_FAIL - Initialization failed
++ */
++#define PTA_CMD_CRYPTO_INIT		1
++
++/*
++ * PTA_CMD_CRYPTO_OPEN_SESSION - open a crypto session
++ *
++ * param[0] (in value)  - value.a: session class
++ * param[1] (out value) - value.a: session ID
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - failed
++ */
++#define PTA_CMD_CRYPTO_OPEN_SESSION	2
++
++/*
++ * PTA_CMD_CRYPTO_CLOSE_SESSION - close an opened crypto session
++ *
++ * param[0] (in value)  - value.a: session class
++ * param[1] (in value)  - value.a: session ID
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - failed
++ */
++#define PTA_CMD_CRYPTO_CLOSE_SESSION	3
++
++/*
++ * PTA_CMD_CRYPTO_AES_RUN - Run AES encrypt/decrypt
++ *
++ * param[0] (in value) - value.a: crypto session ID
++ *                     - value.b: register AES_KSCTL
++ * param[1] (inout memref) - memref.size: size of register map
++ *                           memref.buffer: register map buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - AES encrypt/decrypt operation failed
++ */
++#define PTA_CMD_CRYPTO_AES_RUN		5
++
++/*
++ * PTA_CMD_CRYPTO_SHA_START - Start a SHA session
++ *
++ * param[0] (in value) - value.a: session ID
++ * param[1] (in value) - value.a: HMAC_CTL
++ *                     - value.b: HMAC_KSCTL
++ * param[2] (in value) - value.a: HMAC key length
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - SHA operation failed
++ */
++#define PTA_CMD_CRYPTO_SHA_START	8
++
++/*
++ * PTA_CMD_CRYPTO_SHA_UPDATE - Update SHA input data
++ *
++ * param[0] (in value) - value.a: session ID
++ *                     - value.b: digest byte length
++ * param[1] (inout memref) - memref.size: size of register map
++ *                           memref.buffer: register map buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - SHA operation failed
++ */
++#define PTA_CMD_CRYPTO_SHA_UPDATE	9
++
++/*
++ * PTA_CMD_CRYPTO_SHA_FINAL - final update SHA input data and
++ *                            get output digest
++ *
++ * param[0] (in value) - value.a: session ID
++ *                     - value.b: digest byte length
++ * param[1] (inout memref) - memref.size: size of register map
++ *                           memref.buffer: register map buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - SHA operation failed
++ */
++#define PTA_CMD_CRYPTO_SHA_FINAL	10
++
++/*
++ * PTA_CMD_CRYPTO_ECC_PMUL - Run ECC point multiplication
++ *
++ * param[0] (in value) - value.a: ECC curve ID
++ * param[1] (inout memref) - memref.size: size of register map
++ *                           memref.buffer: register map buffer
++ * param[2] (in value) - value.a: shm offset of parameter block
++ *                     - value.b: shm offset of output buffer
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - ECC operation failed
++ */
++#define PTA_CMD_CRYPTO_ECC_PMUL		15
++
++/*
++ * PTA_CMD_CRYPTO_RSA_RUN - Run RSA engine
++ *
++ * param[0] unused
++ * param[1] (inout memref) - memref.size: size of register map
++ *                           memref.buffer: register map buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_CRYPTO_INVALID - Invalid input param
++ * TEE_ERROR_CRYPTO_FAIL - RSA operation failed
++ */
++#define PTA_CMD_CRYPTO_RSA_RUN		20
++
++#endif /* __CRYPTO_PTA_CLIENT_H */
+diff --git a/core/arch/arm/plat-nuvoton/pta/ks_pta.c b/core/arch/arm/plat-nuvoton/pta/ks_pta.c
+new file mode 100644
+index 0000000..5cea8e6
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/ks_pta.c
+@@ -0,0 +1,706 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ * Copyright (c) 2022, UWINGS Technologies.
++ *
++ */
++#include <crypto/crypto.h>
++#include <kernel/delay.h>
++#include <kernel/pseudo_ta.h>
++#include <kernel/spinlock.h>
++#include <kernel/timer.h>
++#include <kernel/tee_time.h>
++#include <mm/core_memprot.h>
++#include <tee/cache.h>
++#include <platform_config.h>
++#include <tsi_cmd.h>
++#include <io.h>
++#include <string.h>
++#include <ks_pta_client.h>
++
++#define PTA_NAME "nvt_ks.pta"
++
++#define KS_BUSY_TIMEOUT		2000
++
++/*----------------------------------------------------------------------*/
++/*  MA35D1 OTP registers                                                */
++/*----------------------------------------------------------------------*/
++#define OTP_CTL			(otp_base + 0x00)
++#define OTP_CTL_START			(0x1 << 0)
++#define OTP_STS			(otp_base + 0x04)
++#define OTP_STS_BUSY			(0x1 << 0)
++#define OTP_STS_PFF			(0x1 << 1)
++#define OTP_STS_ADDRFF			(0x1 << 2)
++#define OTP_STS_FTMFF			(0x1 << 3)
++#define OTP_STS_CMDFF			(0x1 << 4)
++#define OTP_STS_TFF			(0x1 << 7)
++#define OTP_ADDR		(otp_base + 0x08)
++#define OTP_DATA		(otp_base + 0x0C)
++#define OTP_USMSTS0		(otp_base + 0x10)
++#define OTP_USMSTS1		(otp_base + 0x14)
++
++#define OTP_CMD_READ		(0x0 << 4)
++#define OTP_CMD_PROGRAM		(0x1 << 4)
++#define OTP_CMD_READ_ONLY	(0x2 << 4)
++#define OTP_CMD_FTM		(0x3 << 4)
++#define OTP_CMD_READ_CHKER	(0x7 << 4)
++#define OTP_CMD_READ_CID	(0xB << 4)
++#define OTP_CMD_READ_DID	(0xC << 4)
++#define OTP_CMD_READ_UID	(0xD << 4)
++
++/*----------------------------------------------------------------------*/
++/*  MA35D1 Key Store registers                                         */
++/*----------------------------------------------------------------------*/
++#define KS_CTL			(ks_base + 0x00)
++#define KS_CTL_START			(0x1 << 0)
++#define KS_CTL_OPMODE_POS		1
++#define KS_CTL_OPMODE_MSK		(0x7 << KS_CTL_OPMODE_POS)
++#define KS_CTL_CONT			(0x1 << 7)
++#define KS_CTL_INIT			(0x1 << 8)
++#define KS_CTL_SILENT			(0x1 << 10)
++#define KS_CTL_SCMB			(0x1 << 11)
++#define KS_CTL_TCLR			(0x1 << 14)
++#define KS_CTL_IEN			(0x1 << 15)
++#define KS_METADATA		(ks_base + 0x04)
++#define KS_META_DST_POS			30
++#define KS_META_DST_MSK			(0x3 << KS_META_DST_POS)
++#define KS_META_KNUM_POS		20
++#define KS_META_KNUM_MSK		(0x3f << KS_META_KNUM_POS)
++#define KS_META_SIZE_POS		8
++#define KS_META_SIZE_MSK		(0x1f << KS_META_SIZE_POS)
++#define KS_STS			(ks_base + 0x08)
++#define KS_STS_IF			(0x1 << 0)
++#define KS_STS_EIF			(0x1 << 1)
++#define KS_STS_BUSY			(0x1 << 2)
++#define KS_STS_SRAMFULL			(0x1 << 3)
++#define KS_STS_INITDONE			(0x1 << 7)
++#define KS_STS_RAMINV_POS		8
++#define KS_STS_RAMINV_MSK		(0xFFFFFF << 8)
++#define KS_REMAIN		(ks_base + 0x0C)
++#define KS_REMAIN_RRMNG_POS		0
++#define KS_REMAIN_RRMNG_MSK		(0x1FFF << 0)
++#define KS_SCMBKEY(x)		(ks_base + 0x10 + ((x) * 0x04))
++#define KS_KEY(x)		(ks_base + 0x20 + ((x) * 0x04))
++#define KS_OTPSTS		(ks_base + 0x40)
++
++#define KS_SRAM			0
++#define KS_OTP			2
++
++#define KS_CLT_FUNC_MASK        (KS_CTL_IEN | KS_CTL_TCLR | KS_CTL_SCMB | \
++				 KS_CTL_SILENT)
++
++#define KS_OP_READ		(0x0 << KS_CTL_OPMODE_POS)
++#define KS_OP_WRITE		(0x1 << KS_CTL_OPMODE_POS)
++#define KS_OP_ERASE		(0x2 << KS_CTL_OPMODE_POS)
++#define KS_OP_ERASE_ALL		(0x3 << KS_CTL_OPMODE_POS)
++#define KS_OP_REVOKE		(0x4 << KS_CTL_OPMODE_POS)
++#define KS_OP_REMAN		(0x5 << KS_CTL_OPMODE_POS)
++
++#define KS_TOMETAKEY(x)		(((x) << KS_META_KNUM_POS) & KS_META_KNUM_MSK)
++#define KS_TOKEYIDX(x)		(((x) & KS_META_KNUM_MSK) >> KS_META_KNUM_POS)
++
++static uint16_t _keylen2wcnt[21] = {4, 6, 6, 7, 8, 8, 8, 9, 12, 13, 16, 17,
++				    18, 0, 0, 0, 32, 48, 64, 96, 128};
++
++static bool is_timeout(TEE_Time *t_start, uint32_t timeout)
++{
++	TEE_Time  t_now;
++	uint32_t  time_elapsed;
++
++	tee_time_get_sys_time(&t_now);
++	time_elapsed = (t_now.seconds - t_start->seconds) * 1000 +
++		    (int)t_now.millis - (int)t_start->millis;
++
++	if (time_elapsed > timeout)
++		return true;
++	return false;
++}
++
++static TEE_Result ma35d1_ks_init(void)
++{
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	vaddr_t tsi_base = core_mmu_get_va(TSI_BASE, MEM_AREA_IO_SEC, TSI_REG_SIZE);
++	TEE_Time  t_start;
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN))
++		return ma35d1_tsi_init();
++
++	if ((io_read32(tsi_base + 0x210) & 0x7) != 0x2) {
++		do {
++			io_write32(tsi_base + 0x100, 0x59);
++			io_write32(tsi_base + 0x100, 0x16);
++			io_write32(tsi_base + 0x100, 0x88);
++		} while (io_read32(tsi_base + 0x100) == 0UL);
++
++		io_write32(tsi_base + 0x240, TSI_PLL_SETTING);
++
++		/* wait PLL stable */
++		while ((io_read32(tsi_base + 0x250) & 0x4) == 0)
++			;
++
++		/* Select TSI HCLK from PLL */
++		io_write32(tsi_base + 0x210, (io_read32(tsi_base +
++			   0x210) & ~0x7) | 0x2);
++	}
++
++	/* enable Key Store engine clock */
++	io_write32(tsi_base + 0x204, io_read32(tsi_base + 0x204) |
++		   (1 << 14));
++
++	/*
++	 * Initialize Key Store
++	 */
++	io_write32(KS_CTL, KS_CTL_INIT | KS_CTL_START);
++
++	/* Waiting for init done */
++	tee_time_get_sys_time(&t_start);
++	while ((io_read32(KS_STS) & KS_STS_INITDONE) == 0) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_KS_FAIL;
++	}
++
++	/* Waiting for busy cleared */
++	tee_time_get_sys_time(&t_start);
++	while (io_read32(KS_STS) & KS_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_KS_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_read(uint32_t types,
++				  TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	uint32_t  offset, cont_msk, remain_cnt;
++	uint32_t  *key_buff;
++	uint32_t  i, cnt;
++	TEE_Time  t_start;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (params[0].value.a == KS_SRAM) {
++		if (params[0].value.b > 31)
++			return TEE_ERROR_KS_INVALID;
++	} else {
++		if (params[0].value.a == KS_OTP) {
++			if (params[0].value.b > 9)
++				return TEE_ERROR_KS_INVALID;
++		} else {
++			return TEE_ERROR_KS_INVALID;
++		}
++	}
++
++	remain_cnt = params[1].memref.size;
++	key_buff = params[1].memref.buffer;
++
++	cache_operation(TEE_CACHEINVALIDATE, key_buff, remain_cnt * 4);
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		ret = TSI_KS_Read(params[0].value.a,        /* eType      */
++			params[0].value.b,                  /* i32KeyIdx  */
++			(uint32_t *)virt_to_phys(key_buff), /* au32Key    */
++			remain_cnt                          /* u32WordCnt */
++			);
++		if (ret != ST_SUCCESS) {
++			// EMSG("TSI_KS_Read key %d failed! 0x%x\n", params[0].value.b, ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	/* Specify the key number */
++	io_write32(KS_METADATA, (params[0].value.a << KS_META_DST_POS) |
++		   KS_TOMETAKEY(params[0].value.b));
++
++	/* Clear Status */
++	io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++	offset = 0;
++	cont_msk = 0;
++
++	do {
++		/* Trigger to read the key */
++		io_write32(KS_CTL, cont_msk | KS_OP_READ | KS_CTL_START |
++			   (io_read32(KS_CTL) & KS_CLT_FUNC_MASK));
++
++		/* Waiting for key store processing */
++		tee_time_get_sys_time(&t_start);
++		while (io_read32(KS_STS) & KS_STS_BUSY) {
++			if (is_timeout(&t_start, 500) == true)
++				return TEE_ERROR_KS_FAIL;
++		}
++
++		/* Read the key to key buffer */
++		cnt = 8;
++		if (remain_cnt < cnt)
++			cnt = remain_cnt;
++		for (i = 0; i < cnt; i++) {
++			key_buff[offset + i] = io_read32(KS_KEY(i));
++			// EMSG("R[%d]:0x%08x\n", i, key_buff[offset + i]);
++		}
++
++		cont_msk = KS_CTL_CONT;
++		remain_cnt -= cnt;
++		offset += cnt;
++
++		/* Check error flag */
++		if (io_read32(KS_STS) & KS_STS_EIF)
++			break;
++	} while (remain_cnt > 0);
++
++	/* Check error flag */
++	if (io_read32(KS_STS) & KS_STS_EIF) {
++		EMSG("KS EIF set on writing SRAM keys!\n");
++		return TEE_ERROR_KS_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_write(uint32_t types,
++				   TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	uint32_t  offset, cont_msk, buff_remain, key_wcnt;
++	uint32_t  *key_buff;
++	uint32_t  i, cnt;
++	uint32_t  metadata;
++	TEE_Time  t_start;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_VALUE_OUTPUT,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (params[0].value.a == KS_OTP) {
++		if (KS_TOKEYIDX(params[0].value.b) > 8)
++			return TEE_ERROR_KS_INVALID;
++	} else {
++		if (params[0].value.a != KS_SRAM)
++			return TEE_ERROR_KS_INVALID;
++	}
++
++	buff_remain = params[1].memref.size;
++	key_buff = params[1].memref.buffer;
++
++	metadata = (params[0].value.a << KS_META_DST_POS) | params[0].value.b;
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		cache_operation(TEE_CACHEFLUSH, key_buff, buff_remain * 4);
++		if (params[0].value.a == KS_OTP)
++			ret = TSI_KS_Write_OTP(KS_TOKEYIDX(params[0].value.b),
++					       metadata,
++					       (uint32_t *)
++					       virt_to_phys(key_buff));
++		else
++			ret = TSI_KS_Write_SRAM(metadata,
++						(uint32_t *)
++						virt_to_phys(key_buff),
++						&params[2].value.a);
++		if (ret != ST_SUCCESS) {
++			EMSG("TSI_KS_Write_ fail! 0x%x\n", ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	io_write32(KS_METADATA, metadata);
++
++	/* Get word count of a key by indexing to size table */
++	i = ((params[0].value.b & KS_META_SIZE_MSK) >> KS_META_SIZE_POS);
++	key_wcnt = _keylen2wcnt[i];
++	if (key_wcnt == 0) {			/* Invalid key length */
++		EMSG("Invalid key length!\n");
++		return TEE_ERROR_KS_INVALID;
++	}
++
++	io_write32(KS_STS, KS_STS_EIF);		/* Clear error flag */
++	offset = 0;
++	cont_msk = 0;
++	do {
++		/* Prepare the key to write */
++		cnt = 8;
++		if (key_wcnt < cnt)
++			cnt = key_wcnt;
++		for (i = 0; (i < cnt) && (buff_remain > 0); i++) {
++			// EMSG("w 0x%x\n", key_buff[offset + i]);
++			io_write32(KS_KEY(i), key_buff[offset + i]);
++			buff_remain--;
++		}
++
++		if (i < cnt) {
++			EMSG("Key buffer not enough!\n");
++			return TEE_ERROR_KS_INVALID;
++		}
++
++		/* Clear Status */
++		io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++		/* Write the key */
++		io_write32(KS_CTL, cont_msk | KS_OP_WRITE | KS_CTL_START |
++			   (io_read32(KS_CTL) & KS_CLT_FUNC_MASK));
++
++		cont_msk = KS_CTL_CONT;
++		key_wcnt -= cnt;
++		offset += cnt;
++
++		/* Waiting for key store processing */
++		tee_time_get_sys_time(&t_start);
++		while (io_read32(KS_STS) & KS_STS_BUSY) {
++			if (is_timeout(&t_start, 500) == true)
++				return TEE_ERROR_KS_FAIL;
++		}
++	} while (key_wcnt > 0);
++
++	/* Check error flag */
++	if (io_read32(KS_STS) & KS_STS_EIF) {
++		EMSG("KS EIF set on writing SRAM keys!\n");
++		return TEE_ERROR_KS_FAIL;
++	}
++
++	/* return key number */
++	params[2].value.a = KS_TOKEYIDX(io_read32(KS_METADATA));
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_erase(uint32_t types,
++				   TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	TEE_Time  t_start;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (params[0].value.a == KS_SRAM) {
++		if (params[0].value.b > 31)
++			return TEE_ERROR_KS_INVALID;
++	} else {
++		if (params[0].value.a == KS_OTP) {
++			if (params[0].value.b > 9)
++				return TEE_ERROR_KS_INVALID;
++		} else {
++			return TEE_ERROR_KS_INVALID;
++		}
++	}
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		ret = TSI_KS_EraseKey(params[0].value.a, params[0].value.b);
++		if (ret != ST_SUCCESS) {
++			EMSG("TSI_KS_EraseKey fail! 0x%x\n", ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	/* Specify the key number */
++	io_write32(KS_METADATA, (params[0].value.a << KS_META_DST_POS) |
++		   KS_TOMETAKEY(params[0].value.b));
++
++	/* Clear Status */
++	io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++	/* Erase the key */
++	io_write32(KS_CTL, KS_OP_ERASE | KS_CTL_START |
++		   (io_read32(KS_CTL) & KS_CLT_FUNC_MASK));
++
++	/* Waiting for processing */
++	tee_time_get_sys_time(&t_start);
++	while (io_read32(KS_STS) & KS_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_KS_FAIL;
++	}
++
++	/* Check error flag */
++	if (io_read32(KS_STS) & KS_STS_EIF) {
++		EMSG("KS EIF set on erasing a key!\n");
++		return TEE_ERROR_KS_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_erase_all(void)
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	TEE_Time  t_start;
++	int       ret;
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		ret = TSI_KS_EraseAll();
++		if (ret != ST_SUCCESS) {
++			EMSG("TSI_KS_EraseAll fail! 0x%x\n", ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	io_write32(KS_METADATA, 0);
++
++	/* Clear Status */
++	io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++	/* Erase all */
++	io_write32(KS_CTL, KS_OP_ERASE_ALL | KS_CTL_START |
++		   (io_read32(KS_CTL) & KS_CLT_FUNC_MASK));
++
++	/* Waiting for processing */
++	tee_time_get_sys_time(&t_start);
++	while (io_read32(KS_STS) & KS_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_KS_FAIL;
++	}
++
++	/* Check error flag */
++	if (io_read32(KS_STS) & KS_STS_EIF) {
++		EMSG("KS EIF set on erase all!\n");
++		return TEE_ERROR_KS_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_revoke(uint32_t types,
++				    TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	TEE_Time  t_start;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (params[0].value.a == KS_SRAM) {
++		if (params[0].value.b > 31)
++			return TEE_ERROR_KS_INVALID;
++	} else {
++		if (params[0].value.a == KS_OTP) {
++			if (params[0].value.b > 9)
++				return TEE_ERROR_KS_INVALID;
++		} else {
++			return TEE_ERROR_KS_INVALID;
++		}
++	}
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		ret = TSI_KS_RevokeKey(params[0].value.a, params[0].value.b);
++		if (ret != ST_SUCCESS) {
++			EMSG("TSI_KS_RevokeKey fail! 0x%x\n", ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	/* Specify the key number */
++	io_write32(KS_METADATA, (params[0].value.a << KS_META_DST_POS) |
++		   KS_TOMETAKEY(params[0].value.b));
++
++	/* Clear Status */
++	io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++	/* Erase the key */
++	io_write32(KS_CTL, KS_OP_REVOKE | KS_CTL_START |
++		   (io_read32(KS_CTL) & KS_CLT_FUNC_MASK));
++
++	/* Waiting for processing */
++	tee_time_get_sys_time(&t_start);
++	while (io_read32(KS_STS) & KS_STS_BUSY) {
++		if (is_timeout(&t_start, 500) == true)
++			return TEE_ERROR_KS_FAIL;
++	}
++
++	/* Check error flag */
++	if (io_read32(KS_STS) & KS_STS_EIF) {
++		EMSG("KS EIF set on revoking a key!\n");
++		return TEE_ERROR_KS_FAIL;
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_ks_remain(uint32_t types,
++				    TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   ks_base = core_mmu_get_va(KS_BASE, MEM_AREA_IO_SEC, KS_REG_SIZE);
++	uint32_t  reg_data;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		ret = TSI_KS_GetRemainSize(&params[0].value.a);
++		if (ret != ST_SUCCESS) {
++			EMSG("TSI_KS_GetRemainSize fail! 0x%x\n", ret);
++			return TEE_ERROR_KS_FAIL;
++		}
++		return TEE_SUCCESS;
++	}
++
++	if (io_read32(KS_STS) & KS_STS_BUSY) {
++		EMSG("KS is busy!\n");
++		return TEE_ERROR_KS_BUSY;
++	}
++
++	/* Clear Status */
++	io_write32(KS_STS, KS_STS_EIF | KS_STS_IF);
++
++	reg_data = io_read32(KS_REMAIN);
++	params[0].value.a = (reg_data & KS_REMAIN_RRMNG_MSK) >>
++			     KS_REMAIN_RRMNG_POS;
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_otp_read(uint32_t types,
++				  TEE_Param params[TEE_NUM_PARAMS])
++{
++	vaddr_t   sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t   otp_base = core_mmu_get_va(OTP_BASE, MEM_AREA_IO_SEC, OTP_REG_SIZE);
++	uint32_t  otp_addr, wcnt, i;
++	uint32_t  *key_buff;
++	TEE_Time  t_start;
++	int       ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
++				     TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	otp_addr = params[0].value.a;
++	wcnt = params[1].memref.size;
++	key_buff = params[1].memref.buffer;
++
++	if ((otp_addr < 0x100) || (otp_addr + wcnt * 4 > 0x1D0)) {
++		EMSG("OTP read over range: 0x%x + 0x%x\n", otp_addr, wcnt);
++		return TEE_ERROR_OTP_INVALID;
++	}
++
++	cache_operation(TEE_CACHEINVALIDATE, key_buff, wcnt * 4);
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		for (i = 0; i < wcnt; i ++) {
++			ret = TSI_OTP_Read(otp_addr + i * 4, &key_buff[i]);
++			if (ret != ST_SUCCESS) {
++				EMSG("TSI_OTP_Read fail! 0x%x\n", ret);
++				return TEE_ERROR_OTP_FAIL;
++			}
++		}
++		return TEE_SUCCESS;
++	}
++
++	for (i = 0; i < wcnt; i++) {
++		io_write32(OTP_ADDR, otp_addr + i * 4);
++		io_write32(OTP_CTL, OTP_CMD_READ | OTP_CTL_START);
++
++		/* Waiting for OTP processing */
++		tee_time_get_sys_time(&t_start);
++		while (io_read32(OTP_STS) & OTP_STS_BUSY) {
++			if (is_timeout(&t_start, 500) == true)
++				return TEE_ERROR_OTP_FAIL;
++		}
++
++		if (io_read32(OTP_STS) & (OTP_STS_ADDRFF | OTP_STS_CMDFF)) {
++			EMSG("OTP read failed, status = 0x%x\n",
++				io_read32(OTP_STS));
++			io_write32(OTP_STS, (OTP_STS_ADDRFF | OTP_STS_CMDFF));
++			return TEE_ERROR_OTP_FAIL;
++		}
++		key_buff[i] = io_read32(OTP_DATA);
++	}
++	return TEE_SUCCESS;
++}
++
++static TEE_Result invoke_command(void *pSessionContext __unused,
++				 uint32_t nCommandID, uint32_t nParamTypes,
++				 TEE_Param pParams[TEE_NUM_PARAMS])
++{
++	// EMSG("command entry point for pseudo-TA \"%s\"", PTA_NAME);
++
++	switch (nCommandID) {
++	case PTA_CMD_KS_INIT:
++		return ma35d1_ks_init();
++
++	case PTA_CMD_KS_READ:
++		return ma35d1_ks_read(nParamTypes, pParams);
++
++	case PTA_CMD_KS_WRITE:
++		return ma35d1_ks_write(nParamTypes, pParams);
++
++	case PTA_CMD_KS_ERASE:
++		return ma35d1_ks_erase(nParamTypes, pParams);
++
++	case PTA_CMD_KS_ERASE_ALL:
++		return ma35d1_ks_erase_all();
++
++	case PTA_CMD_KS_REVOKE:
++		return ma35d1_ks_revoke(nParamTypes, pParams);
++
++	case PTA_CMD_KS_REMAIN:
++		return ma35d1_ks_remain(nParamTypes, pParams);
++
++	case PTA_CMD_OTP_READ:
++		return ma35d1_otp_read(nParamTypes, pParams);
++
++	default:
++		break;
++	}
++
++	return TEE_ERROR_NOT_IMPLEMENTED;
++}
++
++pseudo_ta_register(.uuid = PTA_KS_UUID, .name = PTA_NAME,
++		   .flags = PTA_DEFAULT_FLAGS | TA_FLAG_DEVICE_ENUM,
++		   .invoke_command_entry_point = invoke_command);
+diff --git a/core/arch/arm/plat-nuvoton/pta/ks_pta_client.h b/core/arch/arm/plat-nuvoton/pta/ks_pta_client.h
+new file mode 100644
+index 0000000..824bc98
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/ks_pta_client.h
+@@ -0,0 +1,142 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++#ifndef __KS_PTA_CLIENT_H
++#define __KS_PTA_CLIENT_H
++
++#define PTA_KS_UUID { 0xaac83d50, 0xc303, 0x41ee, \
++		{ 0xb8, 0xf2, 0x70, 0x6c, 0x0b, 0x78, 0xe5, 0xad } }
++
++#define TEE_ERROR_KS_BUSY		0x00000001
++#define TEE_ERROR_KS_FAIL		0x00000002
++#define TEE_ERROR_KS_INVALID		0x00000003
++#define TEE_ERROR_OTP_INVALID		0x00000011
++#define TEE_ERROR_OTP_FAIL		0x00000012
++
++/*
++ * PTA_CMD_KS_INIT - Initialize Key Store
++ *
++ * param[0] unused
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_BAD_PARAMETERS - Incorrect input param
++ * TEE_ERROR_KS_FAIL - Initialization failed
++ */
++#define PTA_CMD_KS_INIT			0x1
++
++/*
++ * PTA_CMD_KS_READ - Read a Key Store key
++ *
++ * param[0] (in value) - value.a: 0: SRAM; 2: OTP
++ *                       value.b: key number
++ * param[1] (inout memref) - memref.size: word count of the key
++ *                           memref.buffer: key buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_INVALID - Incorrect input param
++ * TEE_ERROR_KS_FAIL - Read operation failed
++ */
++#define PTA_CMD_KS_READ			0x2
++
++/*
++ * PTA_CMD_KS_WRITE - Write a Key Store key
++ *
++ * param[0] (in value) - value.a: 0: SRAM; 2: OTP
++ *                       value.b: meta data
++ * param[1] (inout memref) - memref.size: word count of the key
++ *                           memref.buffer: key buffer
++ * param[2] (out value) - value.a: key number
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_INVALID - Invalid parameter
++ * TEE_ERROR_KS_FAIL - Write operation failed
++ */
++#define PTA_CMD_KS_WRITE		0x3
++
++/*
++ * PTA_CMD_KS_ERASE - Erase a Key Store key
++ *
++ * param[0] (in value) - value.a: 0: SRAM; 2: OTP
++ *                       value.b: key number
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_INVALID - Incorrect input param
++ * TEE_ERROR_KS_FAIL - Erase operation failed
++ */
++#define PTA_CMD_KS_ERASE		0x4
++
++/*
++ * PTA_CMD_KS_ERASE_ALL - Erase all Key Store SRAM keys
++ *
++ * param[0] unused
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_FAIL - Erase all operation failed
++ */
++#define PTA_CMD_KS_ERASE_ALL		0x5
++
++/*
++ * PTA_CMD_KS_REVOKE - Revoke a Key Store key
++ *
++ * param[0] (in value) - value.a: 0: SRAM; 2: OTP
++ *                       value.b: key number
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_INVALID - Incorrect input param
++ * TEE_ERROR_KS_FAIL - Revoke operation failed
++ */
++#define PTA_CMD_KS_REVOKE		0x6
++
++/*
++ * PTA_CMD_KS_REMAIN - Get the remaining size of Key Store SRAM
++ *
++ * param[0] (out value) - value.a: remaining size of SRAM
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_KS_FAIL - Get remain operation failed
++ */
++#define PTA_CMD_KS_REMAIN		0x7
++
++/*
++ * PTA_CMD_OTP_READ - Read OTP
++ *
++ * param[0] (in value) - value.a: OTP address
++ * param[1] (inout memref) - memref.size: word count of OTP key
++ *                           memref.buffer: key buffer
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_OTP_INVALID - Incorrect input param
++ * TEE_ERROR_OTP_FAIL - read OTP failed
++ */
++#define PTA_CMD_OTP_READ		0x12
++
++#endif /* __KS_PTA_CLIENT_H */
+diff --git a/core/arch/arm/plat-nuvoton/pta/sub.mk b/core/arch/arm/plat-nuvoton/pta/sub.mk
+new file mode 100644
+index 0000000..2f117b0
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/sub.mk
+@@ -0,0 +1,5 @@
++global-incdirs-y += .
++srcs-y += trng_pta.c
++srcs-y += ks_pta.c
++srcs-y += crypto_pta.c
++
+diff --git a/core/arch/arm/plat-nuvoton/pta/trng_pta.c b/core/arch/arm/plat-nuvoton/pta/trng_pta.c
+new file mode 100644
+index 0000000..247144d
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/trng_pta.c
+@@ -0,0 +1,383 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ * Copyright (c) 2022, UWINGS Technologies.
++ *
++ */
++#include <crypto/crypto.h>
++#include <kernel/delay.h>
++#include <kernel/pseudo_ta.h>
++#include <kernel/spinlock.h>
++#include <kernel/timer.h>
++#include <kernel/tee_time.h>
++#include <mm/core_memprot.h>
++#include <platform_config.h>
++#include <tee/cache.h>
++#include <tsi_cmd.h>
++#include <io.h>
++#include <string.h>
++#include <trng_pta_client.h>
++
++#define PTA_NAME "nvt_trng.pta"
++
++#define USE_GEN_NONCE
++#define TRNG_BUSY_TIMEOUT	2000
++
++/*---------------------------------------------------------------------*/
++/*  MA35D1 TRNG registers                                             */
++/*---------------------------------------------------------------------*/
++#define CTRL			(trng_base + 0x000)
++#define CTRL_CMD_OFFSET			(0)
++#define CTRL_CMD_MASK			(0xf << 0)
++
++#define MODE			(trng_base + 0x004)
++#define MODE_SEC_ALG			(0x1 << 0)
++#define MODE_PRED_RESET			(0x1 << 3)
++#define MODE_ADDIN_PRESENT		(0x1 << 4)
++#define MODE_KAT_VEC_OFFSET		(5)
++#define MODE_KAT_VEC_MASK		(0x3 << 5)
++#define MODE_KAT_SEL_OFFSET		(7)
++#define MODE_KAT_SEL_MASK		(0x3 << 7)
++
++#define SMODE			(trng_base + 0x008)
++#define SMODE_NONCE			(0x1 << 0)
++#define SMODE_MISSION_MODE		(0x1 << 1)
++#define SMODE_MAX_REJECTS_OFFSET	(2)
++#define SMODE_MAX_REJECTS_MASK		(0xff << 2)
++#define SMODE_INDIV_HT_DISABLE_OFFSET	(16)
++#define SMODE_INDIV_HT_DISABLE_MASK	(0xff << 16)
++#define SMODE_NOISE_COLLECT		(0x1 << 31)
++
++#define STAT			(trng_base + 0x00C)
++#define STAT_LAST_CMD_OFFSET		(0)
++#define STAT_LAST_CMD_MASK		(0xf << 0)
++#define STAT_SEC_ALG			(0x1 << 4)
++#define STAT_NONCE_MODE			(0x1 << 5)
++#define STAT_MISSION_MODE		(0x1 << 6)
++#define STAT_DRBG_STATE_OFFSET		(7)
++#define STAT_DRBG_STATE_MASK		(0x3 << 7)
++#define STAT_STARTUP_TEST_STUCK		(0x1 << 9)
++#define STAT_STARTUP_TEST_IN_PROG	(0x1 << 10)
++#define STAT_BUSY			(0x1 << 31)
++
++#define IE			(trng_base + 0x010)
++#define IE_ZEROIZED			(0x1 << 0)
++#define IE_KAT_COMPLETED		(0x1 << 1)
++#define IE_NOISE_RDY			(0x1 << 2)
++#define IE_ALARMS			(0x1 << 3)
++#define IE_DONE				(0x1 << 4)
++#define IE_GLBL				(0x1 << 31)
++
++#define ISTAT			(trng_base + 0x014)
++#define ISTAT_ZEROIZED			(0x1 << 0)
++#define ISTAT_KAT_COMPLETED		(0x1 << 1)
++#define ISTAT_NOISE_RDY			(0x1 << 2)
++#define ISTAT_ALARMS			(0x1 << 3)
++#define ISTAT_DONE			(0x1 << 4)
++
++#define ALARMS			(trng_base + 0x018)
++#define ALARMS_FAILED_TEST_ID_OFFSET	(0)
++#define ALARMS_FAILED_TEST_ID_MASK	(0xf << 0)
++#define ALARMS_ILLEGAL_CMD_SEQ		(0x1 << 4)
++#define ALARMS_FAILED_SEED_ST_HT	(0x1 << 5)
++
++#define COREKIT_REL		(trng_base + 0x01C)
++#define COREKIT_REL_REL_NUM_OFFSET	(0)
++#define COREKIT_REL_REL_NUM_MASK	(0xffff << 0)
++#define COREKIT_REL_EXT_VER_OFFSET	(16)
++#define COREKIT_REL_EXT_VER_MASK	(0xff << 16)
++#define COREKIT_REL_EXT_ENUM_OFFSET	(28)
++#define COREKIT_REL_EXT_ENUM_MASK	(0xf << 28)
++
++#define FEATURES		(trng_base + 0x020)
++#define FEATURES_SECURE_RST_STATE	(0x1 << 0)
++#define FEATURES_DIAG_LEVEL_ST_HLT_OFFSET (1)
++#define FEATURES_DIAG_LEVEL_ST_HLT_MASK	(0x7 << 1)
++#define FEATURES_DIAG_LEVEL_CLP800_OFFSET (4)
++#define FEATURES_DIAG_LEVEL_CLP800_MASK	(0x7 << 4)
++#define FEATURES_DIAG_LEVEL_NS		(0x1 << 7)
++#define FEATURES_PS_PRESENT		(0x1 << 8)
++#define FEATURES_AES_256		(0x1 << 9)
++#define RAND(x)			(trng_base + 0x024 + ((x) * 0x04))
++#define RAND_WCNT			4
++#define NPA_DATA(x)		(trng_base + 0x034 + ((x) * 0x04))
++#define NPA_DATA_WCNT			16
++#define SEED(x)			(trng_base + 0x074 + ((x) * 0x04))
++#define SEED_WCNT			12
++#define TIME_TO_SEED		(trng_base + 0x0d0)
++#define BUILD_CFG0		(trng_base + 0x0f0)
++#define BUILD_CFG1		(trng_base + 0x0f4)
++
++/*
++ *  CTL CMD[3:0]  commands
++ */
++#define TCMD_NOP		0x0       /* Execute a NOP */
++#define TCMD_GEN_NOISE		0x1       /* Generate ful-entropy seed from noise  */
++#define TCMD_GEN_NONCE		0x2       /* Generate seed from host written nonce */
++#define TCMD_CREATE_STATE	0x3       /* Move DRBG to create state  */
++#define TCMD_RENEW_STATE	0x4       /* Move DRBG to renew state   */
++#define TCMD_REFRESH_ADDIN	0x5       /* Move DRBG to refresh addin */
++#define TCMD_GEN_RANDOM		0x6       /* Generate a random number   */
++#define TCMD_ADVANCE_STATE	0x7       /* Advance DRBG state         */
++#define TCMD_RUN_KAT		0x8       /* Run KAT on DRBG or entropy source */
++#define TCMD_ZEROIZE		0xf       /* Zeroize                    */
++
++static int ma35d1_trng_wait_busy_clear(vaddr_t trng_base)
++{
++	TEE_Time  t_start, t_cur;
++	uint32_t  mytime;
++
++	tee_time_get_sys_time(&t_start);
++	while (io_read32(STAT) & STAT_BUSY) {
++		tee_time_get_sys_time(&t_cur);
++		mytime = (t_cur.seconds - t_start.seconds) * 1000 +
++		    (int)t_cur.millis - (int)t_start.millis;
++
++		if (mytime > TRNG_BUSY_TIMEOUT)
++			return -1;
++	}
++	return 0;
++}
++
++static int ma35d1_trng_issue_command(vaddr_t trng_base, int cmd)
++{
++	TEE_Time  t_start, t_cur;
++	uint32_t  mytime;
++
++	if (ma35d1_trng_wait_busy_clear(trng_base) != 0)
++		return TEE_ERROR_TRNG_BUSY;
++
++	io_write32(CTRL, (io_read32(CTRL) &
++		   ~CTRL_CMD_MASK) | (cmd << CTRL_CMD_OFFSET));
++
++	tee_time_get_sys_time(&t_start);
++	while (!(io_read32(ISTAT) & ISTAT_DONE)) {
++		tee_time_get_sys_time(&t_cur);
++		mytime = (t_cur.seconds - t_start.seconds) * 1000 +
++		    (int)t_cur.millis - (int)t_start.millis;
++
++		if (mytime > TRNG_BUSY_TIMEOUT) {
++			EMSG("TRNG command %d timeout! ISTAT=0x%x, SMODE=0x%x.\n",
++			     cmd, io_read32(ISTAT),
++			     io_read32(SMODE));
++			return TEE_ERROR_TRNG_COMMAND;
++		}
++	}
++	return 0;
++}
++
++static int ma35d1_trng_gen_nonce(vaddr_t trng_base, uint32_t *nonce)
++{
++	int   i, j, loop, ret;
++
++	io_write32(SMODE, io_read32(SMODE) | SMODE_NONCE);
++
++	if (io_read32(MODE) & MODE_SEC_ALG)
++		loop = 3;
++	else
++		loop = 2;
++
++	for (i = 0; i < loop; i++) {
++		if (ma35d1_trng_wait_busy_clear(trng_base) != 0)
++			return TEE_ERROR_TRNG_BUSY;
++
++		for (j = 0; j < 16; j++)
++			io_write32(NPA_DATA(j), nonce[j]);
++
++		ret = ma35d1_trng_issue_command(trng_base, TCMD_GEN_NONCE);
++		if (ret != 0)
++			return TEE_ERROR_TRNG_GEN_NOISE;
++	}
++	return 0;
++}
++
++static int ma35d1_trng_create_state(vaddr_t trng_base)
++{
++	if (ma35d1_trng_wait_busy_clear(trng_base) != 0)
++		return TEE_ERROR_TRNG_BUSY;
++
++	return ma35d1_trng_issue_command(trng_base, TCMD_CREATE_STATE);
++}
++
++static TEE_Result ma35d1_trng_init(uint32_t types,
++				    TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t nonce[64] = { 0xc47b0294, 0xdbbbee0f, 0xec4757f2, 0x2ffeee35,
++			       0x87ca4730, 0xc3d33b69, 0x1df38bab, 0x63ac0a6b,
++			       0xd38da3ab, 0x584a50ea, 0xb93f2603, 0x09a5c691,
++			       0x09a5c691, 0x024f91ac, 0x6063ce20, 0x229160d9,
++			       0x49e00388, 0x1ab6b0cd, 0xe657cb40, 0x87c5aa81,
++			       0xd611eab8, 0xa7ae6d1c, 0x3a181a28, 0x9391bbec,
++			       0x22186179, 0xb6476813, 0x67e64213, 0x47cc0c01,
++			       0xf53bc314, 0x73545902, 0xd8a14864, 0xb31262d1,
++			       0x2bf77bc3, 0xd81c9e3a, 0xa0657c50, 0x51a2fe50,
++			       0x91ff8818, 0x6de4dc00, 0xba468631, 0x7601971c,
++			       0xdec69b2f, 0x336e9662, 0xef73d94a, 0x618226a3,
++			       0x3cdd3154, 0xf361b408, 0x55d394b4, 0xfc3d7775,
++			       0x8b35e0ef, 0xa221fe17, 0x0d498127, 0x641719f1,
++			       0x4e5197b1, 0x7c84d929, 0xab60aa80, 0x08889570,
++			       0xee42614d, 0x73c2ace4, 0xbaed0e9c, 0x9a12145d,
++			       0xed66a951, 0xeac1e50f, 0x690c563b, 0x5dccdc9d
++			       };
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t trng_base = core_mmu_get_va(TRNG_BASE, MEM_AREA_IO_SEC, TRNG_REG_SIZE);
++	vaddr_t tsi_base = core_mmu_get_va(TSI_BASE, MEM_AREA_IO_SEC, TSI_REG_SIZE);
++	int	ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++
++		ret = ma35d1_tsi_init();
++		if (ret != 0)
++			return ret;
++
++		ret = TSI_TRNG_Init(0, 0); //(uint32_t)((uint64_t)nonce));
++		if (ret == ST_WAIT_TSI_SYNC) {
++			if (TSI_Sync() != ST_SUCCESS)
++				return TEE_ERROR_TRNG_BUSY;
++			ret = TSI_TRNG_Init(0, 0); // (uint32_t)((uint64_t)nonce));
++		}
++		if (ret != ST_SUCCESS)
++			return TEE_ERROR_TRNG_GEN_NOISE;
++
++		return TEE_SUCCESS;
++	}
++
++	if ((io_read32(tsi_base + 0x210) & 0x7) != 0x2) {
++		do {
++			io_write32(tsi_base + 0x100, 0x59);
++			io_write32(tsi_base + 0x100, 0x16);
++			io_write32(tsi_base + 0x100, 0x88);
++		} while (io_read32(tsi_base + 0x100) == 0UL);
++
++		io_write32(tsi_base + 0x240, TSI_PLL_SETTING);
++
++		/* wait PLL stable */
++		while ((io_read32(tsi_base + 0x250) & 0x4) == 0)
++			;
++
++		/* Select TSI HCLK from PLL */
++		io_write32(tsi_base + 0x210, (io_read32(tsi_base +
++			   0x210) & ~0x7) | 0x2);
++	}
++
++	/* enable TRNG engine clock */
++	io_write32(tsi_base + 0x20c, io_read32(tsi_base + 0x20c) |
++		   (1 << 25));
++
++	if (ma35d1_trng_wait_busy_clear(trng_base) != 0)
++		return TEE_ERROR_TRNG_BUSY;
++
++	if (io_read32(STAT) & (STAT_STARTUP_TEST_STUCK |
++		STAT_STARTUP_TEST_IN_PROG)) {
++		/* TRNG startup in progress state! */
++		return TEE_ERROR_TRNG_BUSY;
++	}
++
++	/* SELECT_ALG_AES_256 */
++	io_write32(MODE, io_read32(MODE) | MODE_SEC_ALG);
++
++	ret = ma35d1_trng_gen_nonce(trng_base, nonce);
++	if (ret != 0)
++		return ret;
++
++	ret = ma35d1_trng_create_state(trng_base);
++	if (ret != 0)
++		return ret;
++
++	params[0].value.a = io_read32(STAT);
++	params[0].value.b = io_read32(ISTAT);
++
++	FMSG("TRNG init done.\n");
++	return TEE_SUCCESS;
++}
++
++static TEE_Result ma35d1_trng_read(uint32_t types,
++                                    TEE_Param params[TEE_NUM_PARAMS])
++{
++	uint32_t *rdata = NULL;
++	uint32_t rq_size = 0, get_size = 0;
++	vaddr_t sys_base = core_mmu_get_va(SYS_BASE, MEM_AREA_IO_SEC, SYS_REG_SIZE);
++	vaddr_t trng_base = core_mmu_get_va(TRNG_BASE, MEM_AREA_IO_SEC, TRNG_REG_SIZE);
++	int	i, ret;
++
++	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INOUT,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE,
++				     TEE_PARAM_TYPE_NONE)) {
++		return TEE_ERROR_BAD_PARAMETERS;
++	}
++
++	rq_size = params[0].memref.size;
++
++	if (rq_size % 4)	/* must be multiple of words */
++		return TEE_ERROR_NOT_SUPPORTED;
++
++	rdata = (uint32_t *)params[0].memref.buffer;
++	if (!rdata)
++		return TEE_ERROR_BAD_PARAMETERS;
++
++	if (!(io_read32(sys_base + SYS_CHIPCFG) & TSIEN)) {
++		/*
++		 * TSI enabled. Invoke TSI command and return here.
++		 */
++		cache_operation(TEE_CACHEINVALIDATE, rdata, rq_size);
++
++		ret = TSI_TRNG_Gen_Random(rq_size / 4,
++					  (uint32_t)virt_to_phys(rdata));
++		if (ret != ST_SUCCESS)
++			return TEE_ERROR_TRNG_FAILED;
++
++		return 0;
++	}
++
++	while (rq_size >= 4) {
++		if (ma35d1_trng_wait_busy_clear(trng_base) != 0)
++			return TEE_ERROR_TRNG_BUSY;
++
++		ret = ma35d1_trng_issue_command(trng_base, TCMD_GEN_RANDOM);
++		if (ret != 0)
++			return ret;
++
++		for (i = 0; i < 4; i++) {
++			if (rq_size < 4)
++				break;
++			*rdata = io_read32(RAND(i));
++			rdata++;
++			rq_size -= 4;
++			get_size += 4;
++		}
++	}
++	params[0].memref.size = get_size;
++	FMSG("reqsize = %d, get_size=%d\n", rq_size, get_size);
++	return 0;
++}
++
++static TEE_Result invoke_command(void *pSessionContext __unused,
++				 uint32_t nCommandID, uint32_t nParamTypes,
++				 TEE_Param pParams[TEE_NUM_PARAMS])
++{
++	FMSG("command entry point for pseudo-TA \"%s\"", PTA_NAME);
++
++	switch (nCommandID) {
++	case PTA_CMD_TRNG_INIT:
++		return ma35d1_trng_init(nParamTypes, pParams);
++
++	case PTA_CMD_TRNG_READ:
++		return ma35d1_trng_read(nParamTypes, pParams);
++	default:
++		break;
++	}
++
++	return TEE_ERROR_NOT_IMPLEMENTED;
++}
++
++pseudo_ta_register(.uuid = PTA_TRNG_UUID, .name = PTA_NAME,
++		   .flags = PTA_DEFAULT_FLAGS | TA_FLAG_DEVICE_ENUM,
++		   .invoke_command_entry_point = invoke_command);
+diff --git a/core/arch/arm/plat-nuvoton/pta/trng_pta_client.h b/core/arch/arm/plat-nuvoton/pta/trng_pta_client.h
+new file mode 100644
+index 0000000..f3bec89
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/pta/trng_pta_client.h
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++
++#ifndef __TRNG_PTA_CLIENT_H
++#define __TRNG_PTA_CLIENT_H
++
++#define PTA_TRNG_UUID { 0x9f831ffa, 0x1823, 0x4ee9, \
++		{ 0x8f, 0xb2, 0x41, 0x57, 0x1f, 0x64, 0x32, 0xe1 } }
++
++#define TEE_ERROR_TRNG_BUSY		0x00000001
++#define TEE_ERROR_TRNG_GEN_NOISE	0x00000002
++#define TEE_ERROR_TRNG_COMMAND		0x00000003
++#define TEE_ERROR_TRNG_FAILED		0x00000004
++
++/*
++ * PTA_CMD_TRNG_INIT - Initialize TRNG hardware
++ *
++ * param[0] (out value) - value.a: TRNG STAT register
++ *                        value.b: TRNG ISTAT register
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_TRNG_BUSY - TRNG hardware busy
++ * TEE_ERROR_TRNG_GEN_NOISE - Failed to generate noise or nounce
++ * TEE_ERROR_TRNG_COMMAND - TRNG command failed
++ */
++#define PTA_CMD_TRNG_INIT		0x1
++
++/*
++ * PTA_CMD_TRNG_READ - Get TRNG data
++ *
++ * param[0] (inout memref) - TRNG data buffer memory reference
++ * param[1] unused
++ * param[2] unused
++ * param[3] unused
++ *
++ * Result:
++ * TEE_SUCCESS - Invoke command success
++ * TEE_ERROR_BAD_PARAMETERS - Incorrect input param
++ */
++#define PTA_CMD_TRNG_READ		0x2
++
++#endif /* __TRNG_PTA_CLIENT_H */
+diff --git a/core/arch/arm/plat-nuvoton/sub.mk b/core/arch/arm/plat-nuvoton/sub.mk
+new file mode 100644
+index 0000000..42d020d
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/sub.mk
+@@ -0,0 +1,4 @@
++global-incdirs-y += .
++srcs-y += main.c
++srcs-y += tsi_cmd.c
++subdirs-y += pta
+diff --git a/core/arch/arm/plat-nuvoton/tsi_cmd.c b/core/arch/arm/plat-nuvoton/tsi_cmd.c
+new file mode 100644
+index 0000000..050834a
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/tsi_cmd.c
+@@ -0,0 +1,1200 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ * Copyright (c) 2022, UWINGS Technologies
++ */
++#include <platform_config.h>
++#include <stdint.h>
++#include <string.h>
++#include <mm/core_memprot.h>
++#include <kernel/timer.h>
++#include <kernel/tee_time.h>
++#include <tee/entry_std.h>
++#include <tee/entry_fast.h>
++#include <io.h>
++#include <whc.h>
++#include <tsi_cmd.h>
++
++#define KS_META_SIZE_POS           8
++#define PRNG_KSCTL_OWNER_POS       24
++#define PRNG_KSCTL_ECDH            (0x1 << 19)
++#define PRNG_KSCTL_ECDSA           (0x1 << 20)
++
++typedef struct err_code_t {
++	int	code;
++	char	str[32];
++} ERR_CODE_T;
++
++ERR_CODE_T _err_code_tbl[] = {
++	{ ST_SUCCESS,              "ST_SUCCESS" },
++	{ ST_WAIT_TSI_SYNC,        "ST_WAIT_TSI_SYNC" },
++	{ ST_UNKNOWN_CMD,          "ST_UNKNOWN_CMD" },
++	{ ST_NO_TSI_IMAGE,         "ST_NO_TSI_IMAGE" },
++	{ ST_CMD_QUEUE_FULL,       "ST_CMD_QUEUE_FULL" },
++	{ ST_TIME_OUT,             "ST_TIME_OUT" },
++	{ ST_INVALID_PARAM,        "ST_INVALID_PARAM" },
++	{ ST_NO_AVAIL_SESSION,     "ST_NO_AVAIL_SESSION" },
++	{ ST_INVALID_SESSION_ID,   "ST_INVALID_SESSION_ID" },
++	{ ST_INVALID_OPERATION,    "ST_INVALID_OPERATION"},
++	{ ST_HW_NOT_READY,         "ST_HW_NOT_READY"},
++	{ ST_HW_ERROR,             "ST_HW_ERROR" },
++	{ ST_HW_BUSY,              "ST_HW_BUSY" },
++	{ ST_HW_TIME_OUT,          "ST_HW_TIME_OUT" },
++	{ ST_BUS_ERROR,            "ST_BUS_ERROR" },
++	{ ST_ECC_UNKNOWN_CURVE,    "ST_ECC_UNKNOWN_CURVE" },
++	{ ST_ECC_INVALID_PRIV_KEY, "ST_ECC_INVALID_PRIV_KEY" },
++	{ ST_SIG_VERIFY_ERROR,     "ST_SIG_VERIFY_ERROR" },
++	{ ST_KS_READ_PROTECT,      "ST_KS_READ_PROTECT"},
++	{ ST_KS_FULL,              "ST_KS_FULL" },
++	{ ST_WHC_TX_BUSY,          "ST_WHC_TX_BUSY" },
++	{ ST_CMD_ACK_TIME_OUT,     "ST_CMD_ACK_TIME_OUT" },
++};
++
++#define nu_write_reg(reg, val)	io_write32(whc1_base + (reg), (val))
++#define nu_read_reg(reg)	io_read32(whc1_base + (reg))
++
++static bool is_timeout(TEE_Time *t_start, uint32_t timeout)
++{
++	TEE_Time  t_now;
++	uint32_t  time_elapsed;
++
++	tee_time_get_sys_time(&t_now);
++	time_elapsed = (t_now.seconds - t_start->seconds) * 1000 +
++		    (int)t_now.millis - (int)t_start->millis;
++
++	if (time_elapsed > timeout)
++		return true;
++	return false;
++}
++
++void tsi_print_err_code(int code)
++{
++	uint32_t i;
++
++	for (i = 0; i < sizeof(_err_code_tbl) / sizeof(ERR_CODE_T); i++) {
++		if (_err_code_tbl[i].code == code) {
++			EMSG("  [%s]\n", _err_code_tbl[i].str);
++			return;
++		}
++	}
++	EMSG("\nUnknow error code 0x%x!\n", code);
++}
++
++static int tsi_send_command(TSI_REQ_T *req)
++{
++	vaddr_t   whc1_base = core_mmu_get_va(WHC1_BASE, MEM_AREA_IO_SEC, WHC1_REG_SIZE);
++	int	i;
++
++	for (i = 0; i < 4; i++) {
++		if (nu_read_reg(TXSTS) & (1 << i))  /* Check CHxRDY */
++			break;
++	}
++
++	if (i >= 4) {
++		/* No WHC channel is ready for sending message */
++		return ST_WHC_TX_BUSY;
++	}
++
++	// EMSG("TSI CMD: 0x%x 0x%x 0x%x 0x%x\n", req->cmd[0], req->cmd[1],
++	//     req->cmd[2], req->cmd[3]);
++
++	nu_write_reg(TMDAT(i, 0), req->cmd[0]);
++	nu_write_reg(TMDAT(i, 1), req->cmd[1]);
++	nu_write_reg(TMDAT(i, 2), req->cmd[2]);
++	nu_write_reg(TMDAT(i, 3), req->cmd[3]);
++	nu_write_reg(TXCTL, (1 << i));
++	req->tx_channel = i;
++	return 0;
++}
++
++static int tsi_wait_ack(TSI_REQ_T *req, int time_out)
++{
++	vaddr_t   whc1_base = core_mmu_get_va(WHC1_BASE, MEM_AREA_IO_SEC, WHC1_REG_SIZE);
++	TEE_Time  t_start;
++	int  i = 0;
++
++	tee_time_get_sys_time(&t_start);
++	while (is_timeout(&t_start, time_out) == false) {
++		if (nu_read_reg(RXSTS) & (1 << i)) {	/* Check CHxRDY */
++			if ((nu_read_reg(RMDAT(i, 0)) & TCK_CHR_MASK) ==
++			    (req->cmd[0] & TCK_CHR_MASK)) {
++				req->ack[0] = nu_read_reg(RMDAT(i, 0));
++				req->ack[1] = nu_read_reg(RMDAT(i, 1));
++				req->ack[2] = nu_read_reg(RMDAT(i, 2));
++				req->ack[3] = nu_read_reg(RMDAT(i, 3));
++				nu_write_reg(RXCTL, (1 << i)); /* set CHxACK */
++
++				// EMSG("\n\nACK: 0x%x 0x%x 0x%x 0x%x\n\n",
++				// req->ack[0], req->ack[1], req->ack[2],
++				// req->ack[3]);
++				return 0;
++			}
++		}
++		i = (i + 1) % 4;
++	}
++	return ST_TIME_OUT;
++}
++
++static int tsi_send_command_and_wait(TSI_REQ_T *req, int time_out)
++{
++	int ret;
++
++	ret = tsi_send_command(req);
++	if (ret != 0)
++		return ret;
++
++	ret = tsi_wait_ack(req, time_out);
++	if (ret != 0)
++		return ret;
++	return TA_GET_STATUS(req);
++}
++
++/*
++ * @brief    Force TSI go back to initial state.
++ * @return   0            success
++ * @return   otherwise    Refer to ST_XXX error code.
++ */
++int TSI_Sync(void)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = CMD_TSI_SYNC << 16;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Get the version of TSI firmware.
++ * @param[out]  ver_code     TSI firmware version code.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Get_Version(uint32_t *ver_code)
++{
++	TSI_REQ_T req;
++	int ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = CMD_TSI_GET_VERSION << 16;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*ver_code = req.ack[1];
++	return ret;
++}
++
++/*
++ * @brief    Reset TSI.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Reset(void)
++{
++	TSI_REQ_T req;
++	int ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = CMD_TSI_RESET << 16;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief    Reset TSI.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Config_UART(uint32_t line, uint32_t baud)
++{
++	TSI_REQ_T req;
++	int ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = CMD_TSI_CONFIG_UART << 16;
++	req.cmd[1] = 0x11520087;
++	req.cmd[2] = line;
++	req.cmd[3] = baud;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief    Set TSI system clock.
++ * @param[in]  pllsrc   0: PLL clock source from HXT;
++ *                      1: PLL clock source from HIRC.
++ * @param[in]  clksel   Select TSI system clock rate
++ *                      0:  72 MHz
++ *                      1:  96 MHz
++ *                      2: 144 MHz
++ *                      3: 172 MHz
++ *                      4: 192 MHz
++ *                      5: 224 MHz
++ *                      6: 240 MHz
++ * @return   0          success
++ * @return   otherwise  Refer to ST_XXX error code.
++ */
++int TSI_Set_Clock(int pllsrc, int clksel)
++{
++	TSI_REQ_T req;
++	int ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TSI_SET_CLOCK << 16);
++	if (pllsrc != 0)
++		req.cmd[1] |= (1 << 3);
++	req.cmd[1] |= (clksel & 0x7);
++
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	if (ret != 0)
++		return ret;
++	return 0;
++}
++
++/*
++ * @brief    Load a patch image into TSI.
++ * @param[in]  base      Physical address of the TSI image.
++ * @param[in]  size      Size of the TSI image.
++ * @return   0          success
++ * @return   otherwise  Refer to ST_XXX error code.
++ */
++int TSI_Load_Image(uint32_t base, uint32_t size)
++{
++	TSI_REQ_T  req;
++	int        ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TSI_LOAD_EX_FUNC << 16);
++	req.cmd[1] = base;
++	req.cmd[2] = size;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	if (ret != 0)
++		return ret;
++	return 0;
++}
++
++/*
++ * @brief    Request an encrypt/decrypt session for AES or SHA.
++ * @param[in]   class_code   The command class. Should be C_CODE_AES
++ *                           or C_CODE_SHA.
++ * @param[out]  session_id   The session ID.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Open_Session(int class_code, int *session_id)
++{
++	TSI_REQ_T req;
++	int ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TSI_OPEN_SESSION << 16) | class_code;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	if (ret != 0)
++		return ret;
++	*session_id = req.ack[1] & 0xff;
++	return 0;
++}
++
++/*
++ * @brief    Close an opened session.
++ * @param[in]   class_code   The command class. Should be C_CODE_AES
++ *                           or C_CODE_SHA.
++ * @param[in]   session_id   The session ID.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Close_Session(int class_code, int session_id)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TSI_CLOSE_SESSION << 16) | (class_code << 8) |
++			session_id;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    TRNG init
++ * @param[in]   method      0x0: Self-seeding. Seed is from TRNG noise
++ *                          0x1: Nonce seeding. Seed is from noise and user
++ *                               provied nonce data, which is put in
++ *                               parameter block and length is 48 words.
++ *                          0x2: User seed. Seed is from user provided data,
++ *                               which is put in parameter block and length
++ *                               is 12 words.
++ * @param[in]   pb_addr     Address of parameter block. Not used if <method>
++ *                          is 0.
++ *                          If <method> is 0x1, <param> should contains
++ *                          48 words nounce data.
++ *                          If (method> is 0x2, <param> should contains
++ *                          12 words user defined seed.
++ * @return   0              success
++ * @return   otherwise      Refer to ST_XXX error code.
++ */
++int TSI_TRNG_Init(int method, uint32_t pb_addr)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	if (method != 0 && method != 1 && method != 2)
++		return ST_INVALID_PARAM;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TRNG_INIT << 16) | method;
++	req.cmd[1] = pb_addr;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief    Request TRNG to generate random numbers.
++ * @param[in]  wnct          Word count of random numbers
++ * @param[in]  dest_addr     Destination address.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_TRNG_Gen_Random(uint32_t wcnt, uint32_t dest_addr)
++{
++	TSI_REQ_T  req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_TRNG_GEN_RANDOM << 16);
++	req.cmd[2] = wcnt;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    PRNG re-seed
++ * @param[in]   seed_src     0: Seed is generated from TSI TRNG.
++ *                           1: Use the <seed> as PRNG seed.
++ * @param[in]   seed         PRNG seed
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_PRNG_ReSeed(int seed_src, uint32_t seed)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_PRNG_RESEED << 16);
++	req.cmd[1] = seed_src;
++	req.cmd[2] = seed;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief    Request PRNG to generate a 64-bits random number.
++ * @param[out]  rnd_w0       random number word 0
++ * @param[out]  rnd_w1       random number word 1
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_PRNG_Gen_Random(uint32_t *rnd_w0, uint32_t *rnd_w1)
++{
++	TSI_REQ_T  req;
++	int        ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_PRNG_GEN_RANDOM << 16);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*rnd_w0 = req.ack[1];
++	*rnd_w1 = req.ack[2];
++	return ret;
++}
++
++/*
++ * @brief    Request PRNG to generate mass random numbers.
++ * @param[in]  wnct          Word count of random numbers
++ * @param[in]  dest_addr     Destination address.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_PRNG_Gen_Random_Mass(uint32_t wcnt, uint32_t dest_addr)
++{
++	TSI_REQ_T  req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_PRNG_GEN_RAN_MASS << 16);
++	req.cmd[2] = wcnt;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/**
++ * @brief    Request PRNG to generate a random key to Key Store SRAM
++ * @param[in]  owner       Owner of the random key.
++ *                           0x0: Only for AES used
++ *                           0x1: Only for HMAC used
++ *                           0x4: Only for ECC used
++ *                           0x5: Only for CPU used
++ * @param[in]  is_ecdsa    1: Only for ECC ECDSA
++ * @param[in]  is_ecdh     1: Only for ECC ECDH
++ * @param[in]  keysz       Random key size
++ *                             - KS_META_AES
++ *                             - KS_META_HMAC
++ *                             - KS_META_RSA_EXP
++ *                             - KS_META_RSA_MID
++ *                             - KS_META_ECC
++ *                             - KS_META_CPU
++ *                             - KS_META_128
++ *                             - KS_META_163
++ *                             - KS_META_192
++ *                             - KS_META_224
++ *                             - KS_META_233
++ *                             - KS_META_255
++ *                             - KS_META_256
++ *                             - KS_META_283
++ *                             - KS_META_384
++ *                             - KS_META_409
++ *                             - KS_META_512
++ *                             - KS_META_521
++ *                             - KS_META_571
++ *                             - KS_META_1024
++ *                             - KS_META_2048
++ *                             - KS_META_4096
++ *                             - KS_META_BOOT
++ *                             - KS_META_READABLE
++ *                             - KS_META_PRIV
++ *                             - KS_META_NONPRIV
++ *                             - KS_META_SECURE
++ *                             - KS_META_NONSECUR
++ * @param[out]  key_num    Key Store KS_SRAM key number of the random key
++ * @return   0             success
++ * @return   otherwise     Refer to ST_XXX error code.
++ */
++int TSI_PRNG_GenTo_KS_SRAM(uint32_t owner, int is_ecdsa, int is_ecdh,
++			   uint32_t keysz, int *key_num)
++{
++	TSI_REQ_T  req;
++	int        ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_PRNG_GEN_KS_SRAM << 16);
++	req.cmd[1] = (owner << PRNG_KSCTL_OWNER_POS) |
++			(keysz >> KS_META_SIZE_POS);
++	if (is_ecdh)
++		req.cmd[1] |= PRNG_KSCTL_ECDH;
++	else if (is_ecdsa)
++		req.cmd[1] |= PRNG_KSCTL_ECDSA;
++
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	if (ret == 0)
++		*key_num = req.ack[1];
++	return 0;
++}
++
++/*
++ * @brief    Configure AES encrypt/decrypt mode.
++ * @param[in]  sid      The session ID obtained from TSI_Open_Session().
++ * @param[in]  kinswap  1: Swap key and initial vector
++ *                      0: Do not swap key and initial vector
++ * @param[in]  koutswap 1: Swap feedback output
++ *                      0: Do not swap AES feedback output
++ * @param[in]  inswap   1: Swap input data
++ *                      0: Do not swap input data
++ * @param[in]  outswap  1: Swap output data
++ *                      0: Do not swap output data
++ * @param[in]  sm4en    1: Use SM4 cipher
++ *                      0: Use AES cipher
++ * @param[in]  encrypt  1: Execute encrypt operation
++ *                      0: Execute decrypt operation
++ * @param[in]  mode     Operation mode
++ *                      - \ref AES_MODE_ECB
++ *                      - \ref AES_MODE_CBC
++ *                      - \ref AES_MODE_CFB
++ *                      - \ref AES_MODE_OFB
++ *                      - \ref AES_MODE_CTR
++ *                      - \ref AES_MODE_CBC_CS1
++ *                      - \ref AES_MODE_CBC_CS2
++ *                      - \ref AES_MODE_CBC_CS3
++ *                      - \ref AES_MODE_GCM
++ *                      - \ref AES_MODE_GHASH
++ *                      - \ref AES_MODE_CCM
++ * @param[in]  keysz    Key size
++ *                      - \ref AES_KEY_SIZE_128
++ *                      - \ref AES_KEY_SIZE_192
++ *                      - \ref AES_KEY_SIZE_256
++ * @param[in]  ks       Key source
++ *                      SEL_KEY_FROM_REG:      Key is assigned by AES_Set_Key
++ *                      SEL_KEY_FROM_KS_SRAM:  Key is from TSI Key Store SRAM
++ *                      SEL_KEY_FROM_KS_OTP:   Key is from TSI Key Store OTP
++ * @param[in]  ks_num   Key Store key number
++ * @return   0          success
++ * @return   otherwise  Refer to ST_XXX error code.
++ */
++int TSI_AES_Set_Mode(int sid, int kinswap, int koutswap, int inswap,
++		     int outswap, int sm4en, int encrypt, int mode, int keysz,
++		     int ks, int ks_num)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_SET_MODE << 16) | sid;
++	req.cmd[1] = (kinswap << 25) | (koutswap << 24) | (inswap << 23) |
++			 (outswap << 22) | (sm4en << 17) | (encrypt << 16) |
++			 (mode << 8) | (keysz << 2);
++	req.cmd[2] = (ks << 5) | ks_num;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Set AES/SM4 initial vector.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  iv_addr       Address of the buffer for initial vector
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_AES_Set_IV(int sid, uint32_t iv_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_SET_IV << 16) | sid;
++	req.cmd[1] = iv_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Set AES/SM4 initial vector.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  keysz         Key size
++ *                           - \ref AES_KEY_SIZE_128
++ *                           - \ref AES_KEY_SIZE_192
++ *                           - \ref AES_KEY_SIZE_256
++ * @param[in]  key_addr       Address of the buffer for AES/SM4 key
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_AES_Set_Key(int sid, int keysz, uint32_t key_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_SET_KEY << 16) | sid;
++
++	if (keysz == AES_KEY_SIZE_128)
++		req.cmd[1] = 4;
++	else if (keysz == AES_KEY_SIZE_192)
++		req.cmd[1] = 6;
++	else
++		req.cmd[1] = 8;
++
++	req.cmd[2] = key_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Start AES encrypt/decrypt.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  is_last       1: Is the last run of this AES/SM4 session.
++ *                           0: Is not the last session.
++ * @param[in]  data_cnt      AES/SM4 encrypt/decrypt data count in bytes
++ * @param[in]  src_addr      DMA input data address
++ * @param[in]  dest_addr     DMA output data address
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_AES_Run(int sid, int is_last, int data_cnt, uint32_t src_addr,
++		uint32_t dest_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_RUN << 16) | sid;
++	req.cmd[1] = (is_last << 24) | data_cnt;
++	req.cmd[2] = src_addr;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Start AES encrypt/decrypt.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  is_last       1: Is the last run of this AES/SM4 session.
++ *                           0: Is not the last session.
++ * @param[in]  data_cnt      AES/SM4 encrypt/decrypt data count in bytes
++ * @param[in]  src_addr      DMA input data address
++ * @param[in]  dest_addr     DMA output data address
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_AES_GCM_Run(int sid, int is_last, int data_cnt, uint32_t param_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_GCM_RUN << 16) | sid;
++	req.cmd[1] = (is_last << 24) | data_cnt;
++	req.cmd[2] = param_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Read or write AES/SM4 intermediate feedback data.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  rw            1: read feedback data
++ *                           0: write feedback data
++ * @param[in]  wcnt          Word count of feedback data
++ * @param[in]  fdbck_addr    Feedback data address
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_Access_Feedback(int sid, int rw, int wcnt, uint32_t fdbck_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_AES_ACCESS_FEEDBACK << 16) | sid;
++	req.cmd[1] = (rw << 7) | wcnt;
++	req.cmd[2] = fdbck_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Start to process the first block of a SHA session.
++ * @param[in]  sid      The session ID obtained from TSI_Open_Session().
++ * @param[in]  inswap   1: Swap input data
++ *                      0: Do not swap input data
++ * @param[in]  outswap  1: Swap output data
++ *                      0: Do not swap output data
++ * @param[in]  mode_sel SHA engine mode
++ *                      - \ref SHA_MODE_SEL_SHA1
++ *                      - \ref SHA_MODE_SEL_SHA2
++ *                      - \ref SHA_MODE_SEL_SHA3
++ *                      - \ref SHA_MODE_SEL_SM3
++ *                      - \ref SHA_MODE_SEL_MD5
++ * @param[in]  hmac     1: Use HMAC key
++ *                      0: No HMAC
++ * @param[in]  mode     Operation mode
++ *                      - \ref SHA_MODE_SHA1
++ *                      - \ref SHA_MODE_SHA224
++ *                      - \ref SHA_MODE_SHA256
++ *                      - \ref SHA_MODE_SHA384
++ *                      - \ref SHA_MODE_SHA512
++ *                      - \ref SHA_MODE_SHAKE128
++ *                      - \ref SHA_MODE_SHAKE256
++ * @param[in]  keylen   HMAC key length in bytes. Only effective when
++ *                      <hmac> is 1.
++ * @param[in]  ks       Key source
++ *                      SEL_KEY_FROM_REG:     HMAC key is from
++ *                                            TSI_SHA_Update()
++ *                      SEL_KEY_FROM_KS_SRAM: HMAC key is from TSI Key
++ *                                            Store SRAM
++ *                      SEL_KEY_FROM_KS_OTP:  HMAC key is from TSI Key
++ *                                            Store OTP
++ * @param[in]  ks_num   Key Store key number
++ * @return   0          success
++ * @return   otherwise  Refer to ST_XXX error code.
++ */
++int TSI_SHA_Start(int sid, int inswap, int outswap, int mode_sel, int hmac,
++		  int mode, int keylen, int ks, int ks_num)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_SHA_START << 16) | sid;
++	req.cmd[1] = (inswap << 23) | (outswap << 22) | (mode_sel << 12) |
++			(hmac << 11) | (mode << 8);
++	req.cmd[2] = keylen;
++	req.cmd[3] = (ks << 5) | ks_num;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Update SHA data.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  data_cnt      byte count of input data
++ * @param[in]  src_addr      Address of input data
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_SHA_Update(int sid, int data_cnt, uint32_t src_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_SHA_UPDATE << 16) | sid;
++	req.cmd[1] = data_cnt;
++	req.cmd[2] = src_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Update the last block of data and get result digest.
++ * @param[in]  sid           The session ID obtained from TSI_Open_Session().
++ * @param[in]  wcnt          Word count of output digest
++ * @param[in]  data_cnt      Byte count of input data
++ * @param[in]  src_addr      Address of input data
++ * @param[in]  dest_addr     Address of output digest
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_SHA_Finish(int sid, int wcnt, int data_cnt, uint32_t src_addr,
++		   uint32_t dest_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_SHA_FINISH << 16) | sid;
++	req.cmd[1] = (wcnt << 24) | data_cnt;
++	req.cmd[2] = src_addr;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Run SHA all at once.
++ * @param[in]  inswap        1: Swap input data
++ *                           0: Do not swap input data
++ * @param[in]  outswap       1: Swap output data
++ *                           0: Do not swap output data
++ * @param[in]  mode_sel      SHA engine mode
++ *                           - \ref SHA_MODE_SEL_SHA1
++ *                           - \ref SHA_MODE_SEL_SHA2
++ *                           - \ref SHA_MODE_SEL_SHA3
++ *                           - \ref SHA_MODE_SEL_SM3
++ *                           - \ref SHA_MODE_SEL_MD5
++ * @param[in]  mode          Operation mode
++ *                           - \ref SHA_MODE_SHA1
++ *                           - \ref SHA_MODE_SHA224
++ *                           - \ref SHA_MODE_SHA256
++ *                           - \ref SHA_MODE_SHA384
++ *                           - \ref SHA_MODE_SHA512
++ *                           - \ref SHA_MODE_SHAKE128
++ *                           - \ref SHA_MODE_SHAKE256
++ * @param[in]  wcnt          Word count of output digest
++ * @param[in]  data_cnt      Byte count of input data
++ * @param[in]  src_addr      Address of input data
++ * @param[in]  dest_addr     Address of output digest
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_SHA_All_At_Once(int inswap, int outswap, int mode_sel, int mode,
++			int wcnt, int data_cnt, uint32_t src_addr,
++			uint32_t dest_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_SHA_ALL_AT_ONCE << 16) |
++			((data_cnt >> 8) & 0xffff);
++	req.cmd[1] = ((data_cnt & 0xff) << 24) | (inswap << 23) |
++			(outswap << 22) | (mode_sel << 12) |
++			(mode << 8) | wcnt;
++	req.cmd[2] = src_addr;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Generate an ECC public key.
++ * @param[in]  curve_id      ECC curve ID
++ * @param[in]  is_ecdh       Only used when psel is ECC_KEY_SEL_KS_SRAM.
++ *                           0: is not ECDH key.
++ *                           1: is ECDH key.
++ * @param[in]  psel   Select private key source
++ *                    ECC_KEY_SEL_TRNG    : Private key is generated by TRNG
++ *                    ECC_KEY_SEL_KS_OTP  : Private Key is from Key Store OTP
++ *                    ECC_KEY_SEL_KS_SRAM : Private Key is from Key Store SRAM
++ *                    ECC_KEY_SEL_USER    : User defined private key
++ * @param[in]  d_knum        The Key Store key index. Effective only when
++ *                           <psel> is 0x01 or 0x02.
++ * @param[in]  priv_key      Address of input private key. Effective only when
++ *                           <psel> is 0x03.
++ * @param[in]  pub_key       Address of the output public key.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_ECC_GenPublicKey(int curve_id, int is_ecdh, int psel,
++			 int d_knum, uint32_t priv_key, uint32_t pub_key)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_ECC_GEN_PUB_KEY << 16) | curve_id;
++	req.cmd[1] = (is_ecdh << 10) | (psel << 8) | d_knum;
++	req.cmd[2] = priv_key;
++	req.cmd[3] = pub_key;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Generate an ECC signature.
++ * @param[in]  curve_id      ECC curve ID
++ * @param[in]  rsel          0: Random number is generated by TSI TRNG
++ *                           1: Use the random number specified in
++ *                              parameter block.
++ * @param[in]  psel  Select private key source
++ *                   ECC_KEY_SEL_TRNG    : Private key is generated by TRNG
++ *                   ECC_KEY_SEL_KS_OTP  : Private Key is from Key Store OTP
++ *                   ECC_KEY_SEL_KS_SRAM : Private Key is from Key Store SRAM
++ *                   ECC_KEY_SEL_USER    : User defined private key
++ * @param[in]  d_knum        The Key Store key index. Effective only when
++ *                           <psel> is 0x01 or 0x02.
++ * @param[in]  param_addr    Address of the input parameter block, including
++ *                           message and private key.
++ *                           The private key in parameter block is effective
++ *                           only when <psel> is 0x03.
++ * @param[in]  sig_addr      Address of the output signature.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_ECC_GenSignature(int curve_id, int rsel, int psel, int d_knum,
++			 uint32_t param_addr, uint32_t sig_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_ECC_GEN_SIG << 16) | curve_id;
++	req.cmd[1] = (rsel << 10) | (psel << 8) | d_knum;
++	req.cmd[2] = param_addr;
++	req.cmd[3] = sig_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Generate an ECC signature.
++ * @param[in]  curve_id      ECC curve ID
++ * @param[in]  psel          Select public key source
++ *                   ECC_KEY_SEL_KS_OTP : Public key is from Key Store OTP
++ *                   ECC_KEY_SEL_KS_SRAM: Public key is from Key Store SRAM
++ *                   ECC_KEY_SEL_USER   : Public key is from parameter block
++ * @param[in]  x_knum        The Key Store key number of public key X.
++ *                           Effective only when <psel> is 0x01 or 0x02.
++ * @param[in]  y_knum        The Key Store key number of public key Y.
++ *                           Effective only when <psel> is 0x01 or 0x02.
++ * @param[in]  param_addr    Address of the input parameter block.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_ECC_VerifySignature(int curve_id, int psel, int x_knum,
++			    int y_knum, uint32_t param_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_ECC_VERIFY_SIG << 16) | curve_id;
++	req.cmd[1] = (psel << 16) | (y_knum << 8) | x_knum;
++	req.cmd[2] = param_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Execute ECC point multiplication.
++ * @param[in]  curve_id      ECC curve ID
++ * @param[in]  type          Type of multipler k. 0x1: is ECDH key
++ * @param[in]  msel          Select the source of multiplier
++ *                           0x1: Multiplier is from Key Store OTP
++ *                           0x2: Multiplier is from Key Store SRAM
++ *                           0x3: Multiplier is from parameter block
++ * @param[in]  sps           Select the source of input point
++ *                           0x1: Input point is from Key Store OTP
++ *                           0x2: Input point is from Key Store SRAM
++ *                           0x3: Input point is from parameter block
++ * @param[in]  m_knum        The Key Store key number of multiplier.
++ *                            Used only when <ms> is 0x01 or 0x02.
++ * @param[in]  x_knum        The Key Store key number of input point X.
++ *                           Effective only when <msel> is 0x01 or 0x02.
++ * @param[in]  y_knum        The Key Store key number of input point Y.
++ *                           Effective only when <msel> is 0x01 or 0x02.
++ * @param[in]  param_addr    Address of the input parameter block.
++ * @param[in]  dest_addr     Address of the output ECC point.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int TSI_ECC_Multiply(int curve_id, int type, int msel, int sps,
++		     int m_knum, int x_knum, int y_knum,
++		     uint32_t param_addr, uint32_t dest_addr)
++{
++	TSI_REQ_T req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_ECC_MULTIPLY << 16) | curve_id;
++	req.cmd[1] = (type << 28) | (msel << 26) | (sps << 24) |
++			(m_knum << 16) | (x_knum << 8) | (y_knum);
++	req.cmd[2] = param_addr;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief    Execute RSA exponent modulus.
++ * @param[in]  rsa_len      RSA bit length
++ *                            0: 1024 bits
++ *                            1: 2048 bits
++ *                            2: 3072 bits
++ *                            3: 4096 bits
++ * @param[in]  crt            0: disable CRT; 1: enable CRT
++ * @param[in]  esel         Select private key source
++ *                          RSA_KEY_SEL_KS_OTP: Exponent of exponentiation
++ *                            is from Key Store OTP
++ *                          RSA_KEY_SEL_KS_SRAM : Exponent of exponentiation
++ *                            is from Key Store SRAM
++ *                          RSA_KEY_SEL_USER: Exponent of exponentiation
++ *                            is from input parameter block.
++ * @param[in]  e_knum       The Key Store key number of RSA exponent E.
++ *                          Used only when <esel> is RSA_KEY_SEL_KS_OTP
++ *                          or RSA_KEY_SEL_KS_SRAM.
++ * @param[in]  param_addr   Address of the input parameter block.
++ * @param[in]  dest_addr    Address of the output data.
++ * @return   0              success
++ * @return   otherwise      Refer to ST_XXX error code.
++ */
++int TSI_RSA_Exp_Mod(int rsa_len, int crt, int esel, int e_knum,
++		    uint32_t param_addr, uint32_t dest_addr)
++{
++	TSI_REQ_T  req;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_EXT_RSA_EXP_MOD << 16) | rsa_len;
++	req.cmd[1] = (crt << 10) | (esel << 8) | e_knum;
++	req.cmd[2] = param_addr;
++	req.cmd[3] = dest_addr;
++	return tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++}
++
++/*
++ * @brief      Write key to key store SRAM
++ * @param[in]  u32Meta      The metadata of the key.
++ *                          It could be the combine of
++ *                             - KS_META_AES
++ *                             - KS_META_HMAC
++ *                             - KS_META_RSA_EXP
++ *                             - KS_META_RSA_MID
++ *                             - KS_META_ECC
++ *                             - KS_META_CPU
++ *                             - KS_META_128
++ *                             - KS_META_163
++ *                             - KS_META_192
++ *                             - KS_META_224
++ *                             - KS_META_233
++ *                             - KS_META_255
++ *                             - KS_META_256
++ *                             - KS_META_283
++ *                             - KS_META_384
++ *                             - KS_META_409
++ *                             - KS_META_512
++ *                             - KS_META_521
++ *                             - KS_META_571
++ *                             - KS_META_1024
++ *                             - KS_META_2048
++ *                             - KS_META_4096
++ *                             - KS_META_BOOT
++ *                             - KS_META_READABLE
++ *                             - KS_META_PRIV
++ *                             - KS_META_NONPRIV
++ *                             - KS_META_SECURE
++ *                             - KS_META_NONSECUR
++ * @param[out] au32Key       The buffer to store the key.
++ * @param[in]  iKeyNum       The SRAM key number which the key was written to.
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int  TSI_KS_Write_SRAM(uint32_t u32Meta, uint32_t au32Key[], uint32_t *iKeyNum)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_WRITE_SRAM_KEY << 16);
++	req.cmd[1] = u32Meta;
++	req.cmd[2] = (uint32_t)((uint64_t)au32Key);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*iKeyNum = req.ack[1];
++	return ret;
++}
++
++/*
++ * @brief      Write key to key store OTP
++ * @param[out] iKeyNum      Key number of the OTP key to write
++ * @param[in]  u32Meta      The metadata of the key.
++ *                          It could be the combine of
++ *                             - KS_META_AES
++ *                             - KS_META_HMAC
++ *                             - KS_META_RSA_EXP
++ *                             - KS_META_RSA_MID
++ *                             - KS_META_ECC
++ *                             - KS_META_CPU
++ *                             - KS_META_128
++ *                             - KS_META_163
++ *                             - KS_META_192
++ *                             - KS_META_224
++ *                             - KS_META_233
++ *                             - KS_META_255
++ *                             - KS_META_256
++ *                             - KS_META_283
++ *                             - KS_META_384
++ *                             - KS_META_409
++ *                             - KS_META_512
++ *                             - KS_META_521
++ *                             - KS_META_571
++ *                             - KS_META_1024
++ *                             - KS_META_2048
++ *                             - KS_META_4096
++ *                             - KS_META_BOOT
++ *                             - KS_META_READABLE
++ *                             - KS_META_PRIV
++ *                             - KS_META_NONPRIV
++ *                             - KS_META_SECURE
++ *                             - KS_META_NONSECUR
++ * @param[out] au32Key       The buffer to store the key
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int  TSI_KS_Write_OTP(int KeyNum, uint32_t u32Meta, uint32_t au32Key[])
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_WRITE_OTP_KEY << 16);
++	req.cmd[1] = u32Meta;
++	req.cmd[2] = (uint32_t)((uint64_t)au32Key);
++	req.cmd[3] = KeyNum;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief      Read key from key store
++ * @param[in]  eType       The memory type. It could be:
++ *                           - KS_SRAM
++ *                           - KS_OTP
++ * @param[in]  i32KeyIdx   The key index to read
++ * @param[out] au32Key     The buffer to store the key
++ * @param[in]  u32WordCnt  The word (32-bit) count of the key buffer size
++ * @return   0             success
++ * @return   otherwise     Refer to ST_XXX error code.
++ */
++int  TSI_KS_Read(int eType, int32_t i32KeyIdx,
++		 uint32_t au32Key[], uint32_t u32WordCnt)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_READ_KEY << 16);
++	req.cmd[1] = (eType << 30) | (u32WordCnt << 8) | i32KeyIdx;
++	req.cmd[2] = (uint32_t)((uint64_t)au32Key);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief      Revoke a key in key store
++ * @param[in]  eType       The memory type. It could be:
++ *                           - KS_SRAM
++ *                           - KS_OTP
++ * @param[in]  i32KeyIdx   The key index to read
++ * @return   0             success
++ * @return   otherwise     Refer to ST_XXX error code.
++ */
++int  TSI_KS_RevokeKey(int eType, int32_t i32KeyIdx)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_REVOKE_KEY << 16);
++	req.cmd[1] = (eType << 30) | i32KeyIdx;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief      Erase a key from key store
++ * @param[in]    eType     The memory type. It could be:
++ *                           - KS_SRAM
++ *                           - KS_OTP
++ * @param[in]  i32KeyIdx   The key index to erase
++ * @return   0             success
++ * @return   otherwise     Refer to ST_XXX error code.
++ */
++int  TSI_KS_EraseKey(int eType, int32_t i32KeyIdx)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_ERASE_KEY << 16);
++	req.cmd[1] = (eType << 30) | i32KeyIdx;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief      Erase all keys from Key Store SRAM
++ * @return     0               success
++ * @return     otherwise       Refer to ST_XXX error code.
++ */
++int  TSI_KS_EraseAll(void)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_ERASE_ALL << 16);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	return ret;
++}
++
++/*
++ * @brief      Get remain size of Key Store SRAM
++ * @param[in]  remain_size   Remain size of KS_SRAM
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int  TSI_KS_GetRemainSize(uint32_t *remain_size)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_REMAIN_SIZE << 16);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*remain_size = req.ack[1];
++	return ret;
++}
++
++/*
++ * @brief       Get status of Key Store
++ * @param[out]  ks_sts       content of KS_STS register
++ * @param[out]  ks_otpsts    content of KS_OTPSTS register
++ * @param[out]  ks_metadata  content of KS_METADATA register
++ * @return   0               success
++ * @return   otherwise       Refer to ST_XXX error code.
++ */
++int  TSI_KS_GetStatus(uint32_t *ks_sts, uint32_t *ks_otpsts,
++		      uint32_t *ks_metadata)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_KS_GET_STATUS << 16);
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*ks_sts = req.ack[1];
++	*ks_otpsts = req.ack[2];
++	*ks_metadata = req.ack[3];
++	return ret;
++}
++
++/*
++ * @brief      Read key data from OTP
++ * @param[in]  u32Addr     The OTP address
++ * @param[out] u32Data     The data read from OTP
++ * @return   0             success
++ * @return   otherwise     Refer to ST_XXX error code.
++ */
++int  TSI_OTP_Read(uint32_t u32Addr, uint32_t *u32Data)
++{
++	TSI_REQ_T  req;
++	int  ret;
++
++	memset(&req, 0, sizeof(req));
++	req.cmd[0] = (CMD_EXT_OTP_READ << 16);
++	req.cmd[1] = u32Addr;
++	ret = tsi_send_command_and_wait(&req, CMD_TIME_OUT_2S);
++	*u32Data = req.ack[1];
++	return ret;
++}
+diff --git a/core/arch/arm/plat-nuvoton/tsi_cmd.h b/core/arch/arm/plat-nuvoton/tsi_cmd.h
+new file mode 100644
+index 0000000..be2607d
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/tsi_cmd.h
+@@ -0,0 +1,248 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++#ifndef __TSI_CMD_H__
++#define __TSI_CMD_H__
++
++/*------------------------------------------------------------------*/
++/*  TSI command class code                                          */
++/*------------------------------------------------------------------*/
++#define C_CODE_TSI_CTRL         0x01
++#define C_CODE_TRNG             0x02
++#define C_CODE_PRNG             0x03
++#define C_CODE_AES              0x04
++#define C_CODE_SHA              0x05
++#define C_CODE_ECC              0x06
++#define C_CODE_RSA              0x07
++#define C_CODE_KS               0x08
++#define C_CODE_OTP              0x09
++
++/*------------------------------------------------------------------*/
++/*  TSI commands                                                    */
++/*------------------------------------------------------------------*/
++#define CMD_TSI_SYNC            0x0101
++#define CMD_TSI_GET_VERSION     0x0102
++#define CMD_TSI_SET_CLOCK       0x0110
++#define CMD_TSI_RESET           0x0111
++#define CMD_TSI_CONFIG_UART     0x0130
++#define CMD_TSI_LOAD_EX_FUNC    0x0140
++#define CMD_TSI_MONITOR_SET     0x0142
++#define CMD_TSI_MONITOR_STATUS  0x0143
++#define CMD_TSI_MONITOR_CLOSE   0x0144
++#define CMD_TSI_OPEN_SESSION    0x0150
++#define CMD_TSI_CLOSE_SESSION   0x0151
++#define CMD_TRNG_INIT           0x0201
++#define CMD_TRNG_GEN_RANDOM     0x0205
++#define CMD_PRNG_RESEED         0x0301
++#define CMD_PRNG_GEN_RANDOM     0x0305
++#define CMD_PRNG_GEN_RAN_MASS   0x0315
++#define CMD_PRNG_GEN_KS_SRAM    0x0320
++#define CMD_AES_SET_MODE        0x0401
++#define CMD_AES_SET_IV          0x0402
++#define CMD_AES_SET_KEY         0x0403
++#define CMD_AES_RUN             0x0405
++#define CMD_AES_GCM_RUN         0x0406
++#define CMD_AES_CCM_RUN         0x0408
++#define CMD_AES_ACCESS_FEEDBACK 0x0409
++#define CMD_SHA_START           0x0501
++#define CMD_SHA_UPDATE          0x0502
++#define CMD_SHA_FINISH          0x0503
++#define CMD_SHA_ALL_AT_ONCE     0x0505
++#define CMD_ECC_GEN_PUB_KEY     0x0601
++#define CMD_ECC_GEN_SIG         0x0602
++#define CMD_ECC_VERIFY_SIG      0x0603
++#define CMD_ECC_MULTIPLY        0x0604
++#define CMD_RSA_EXP_MOD         0x0702
++#define CMD_KS_WRITE_SRAM_KEY   0x0A01
++#define CMD_KS_WRITE_OTP_KEY    0x0A02
++#define CMD_KS_READ_KEY         0x0A05
++#define CMD_KS_REVOKE_KEY       0x0A08
++#define CMD_KS_ERASE_KEY        0x0A10
++#define CMD_KS_ERASE_ALL        0x0A11
++#define CMD_KS_REMAIN_SIZE      0x0A15
++#define CMD_KS_GET_STATUS       0x0A20
++
++#define CMD_EXT_OTP_READ        0xF910
++#define	CMD_EXT_RSA_EXP_MOD     0xFE51
++
++/*------------------------------------------------------------------*/
++/*  TSI command ACK status                                          */
++/*------------------------------------------------------------------*/
++#define ST_SUCCESS              0x00
++#define ST_WAIT_TSI_SYNC        0x01 /* Waiting host to send TSI_SYNC command    */
++#define ST_UNKNOWN_CMD          0x02 /* Unknown command                          */
++#define ST_NO_TSI_IMAGE         0x03 /* TSI image is required                    */
++#define ST_CMD_QUEUE_FULL       0x04 /* TSI command queue is full                */
++#define ST_TIME_OUT             0x10 /* Command request time-out                 */
++#define ST_INVALID_PARAM        0x11 /* Invalid parameter                        */
++#define ST_NO_AVAIL_SESSION     0x12 /* No available AES/SHA sessions            */
++#define ST_INVALID_SESSION_ID   0x13 /* Not an opened AES/SHA session ID         */
++#define ST_INVALID_OPERATION    0x14 /* Invalid operation                        */
++#define ST_HW_NOT_READY         0x31 /* Hrdawre engine in not ready              */
++#define ST_HW_ERROR             0x32 /* Hardware engine report error             */
++#define ST_HW_BUSY              0x33 /* Hardware engine is busy on other request */
++#define ST_HW_TIME_OUT          0x34 /* Hardware engine time-out                 */
++#define ST_BUS_ERROR            0x35 /* Memory address can not access            */
++#define ST_KS_ERROR             0x40 /* Key Store key error                      */
++#define ST_MON_FULL             0x41 /* All monitors are used.                   */
++#define ST_MON_ID_ERR           0x42 /* Invalid monitor ID                       */
++#define ST_MON_CHECK_FAIL       0x43 /* Monitor found memory area modified       */
++#define ST_IMG_SIZE             0x45 /* Patch image size over limitation         */
++#define ST_IMG_VERIFY           0x46 /* Patch image size authentication failed   */
++#define ST_ECC_UNKNOWN_CURVE    0x61 /* Unknown ECC curve                        */
++#define ST_ECC_INVALID_PRIV_KEY 0x62 /* ECC private key in not valid             */
++#define ST_SIG_VERIFY_ERROR     0x70 /* ECC/RSA signature verification failed    */
++#define ST_KS_READ_PROTECT      0x80 /* Key Store key entry cannot read by CPU   */
++#define ST_KS_FULL              0x81 /* Key Store full                           */
++#define ST_WHC_TX_BUSY          0xd1 /* All TX channel of Wormhole are busy      */
++#define ST_CMD_ACK_TIME_OUT     0xd2 /* TSI does not ack command in time limit   */
++
++typedef struct tsi_cmd_t {
++	uint32_t	cmd[4];
++	uint32_t	ack[4];
++	int		tx_channel; /* WHC TX channel used to send this command  */
++	uint32_t	tx_jiffy;   /* the jiffy of command being send           */
++	int		session_id; /* for AES and SHA only                      */
++	uint32_t	addr_param; /* parameter block address                   */
++	uint32_t	caddr_src;  /* current data source address               */
++	uint32_t	caddr_dst;  /* current data destination address          */
++	uint32_t	remain_len; /* remaining data length                     */
++} TSI_REQ_T;
++
++enum {
++	TREQ_ST_UNUSED = 0,
++	TREQ_ST_WAIT_PROCESS,
++	TREQ_ST_PROCESSING,
++	TREQ_ST_ACK_SEND,
++};
++
++#define TC_GET_CLASS_CODE(r)	((((r)->cmd[0]) >> 24) & 0xff)
++#define TC_GET_SUB_CODE(r)	((((r)->cmd[0]) >> 16) & 0xff)
++#define TC_GET_COMMAND(r)	((((r)->cmd[0]) >> 16) & 0xffff)
++#define TC_GET_SESSION_ID(r)	(((r)->cmd[0]) & 0xff)
++#define TC_SET_CLASS_CODE(r, c)	((r)->cmd[0]) = (((r)->cmd[0]) & 0x00ffffff) | \
++				(((c) & 0xff) << 24)
++#define TC_SET_SUB_CODE(r, c)	((r)->cmd[0]) = (((r)->cmd[0]) & 0xff00ffff) | \
++				(((c) & 0xff) << 16)
++#define TC_SET_SESSION_ID(r, s)	((r)->cmd[0]) = (((r)->cmd[0]) & 0xffffff00) | \
++				((s) & 0xff)
++#define TA_GET_CLASS_CODE(a)	((((a)->ack[0]) >> 24) & 0xff)
++#define TA_GET_SESSION_ID(a)	(((a)->ack[0]) & 0xff)
++#define TA_GET_STATUS(a)	((((a)->ack[0]) >> 8) & 0xff)
++
++/* Command/ACK characteristic is composed of class code, sub-code, and session ID */
++#define TCK_CHR_MASK			(0xffff00ff)
++
++#define TSI_CMD_WORD0(cc, sc, sid)	(((cc) << 24) | ((sc) << 16) | (sid))
++
++#define CMD_TIME_OUT_1S             1000     /* general time-out 1 seconds */
++#define CMD_TIME_OUT_2S             2000     /* general time-out 2 seconds */
++#define CMD_TIME_OUT_3S             3000     /* general time-out 3 seconds */
++#define CMD_TIME_OUT_5S             5000     /* general time-out 5 seconds */
++
++#define SEL_KEY_FROM_REG            0x0
++#define SEL_KEY_FROM_KS_SRAM        0x1
++#define SEL_KEY_FROM_KS_OTP         0x5
++
++#define ECC_KEY_SEL_TRNG            0x0
++#define ECC_KEY_SEL_KS_OTP          0x1
++#define ECC_KEY_SEL_KS_SRAM         0x2
++#define ECC_KEY_SEL_USER            0x3
++
++#define RSA_KEY_SEL_KS_OTP          0x1
++#define RSA_KEY_SEL_KS_SRAM         0x2
++#define RSA_KEY_SEL_USER            0x3
++
++#define AES_KEY_SIZE_128            0UL
++#define AES_KEY_SIZE_192            1UL
++#define AES_KEY_SIZE_256            2UL
++
++enum {
++	CURVE_P_192  = 0x01,
++	CURVE_P_224  = 0x02,
++	CURVE_P_256  = 0x03,
++	CURVE_P_384  = 0x04,
++	CURVE_P_521  = 0x05,
++	CURVE_K_163  = 0x11,
++	CURVE_K_233  = 0x12,
++	CURVE_K_283  = 0x13,
++	CURVE_K_409  = 0x14,
++	CURVE_K_571  = 0x15,
++	CURVE_B_163  = 0x21,
++	CURVE_B_233  = 0x22,
++	CURVE_B_283  = 0x23,
++	CURVE_B_409  = 0x24,
++	CURVE_B_571  = 0x25,
++	CURVE_KO_192 = 0x31,
++	CURVE_KO_224 = 0x32,
++	CURVE_KO_256 = 0x33,
++	CURVE_BP_256 = 0x41,
++	CURVE_BP_384 = 0x42,
++	CURVE_BP_512 = 0x43,
++	CURVE_SM2_256 = 0x50,
++	CURVE_25519  = 0x51,
++	CURVE_UNDEF,
++};
++
++void tsi_print_err_code(int code);
++
++int ma35d1_tsi_init(void);
++int TSI_Sync(void);
++int TSI_Get_Version(uint32_t *ver_code);
++int TSI_Reset(void);
++int TSI_Config_UART(uint32_t line, uint32_t baud);
++int TSI_Set_Clock(int pllsrc, int clksel);
++int TSI_Load_Image(uint32_t base, uint32_t size);
++int TSI_Open_Session(int class_code, int *session_id);
++int TSI_Close_Session(int class_code, int session_id);
++int TSI_TRNG_Init(int method, uint32_t pb_addr);
++int TSI_TRNG_Gen_Random(uint32_t wcnt, uint32_t dest_addr);
++int TSI_PRNG_ReSeed(int seed_src, uint32_t seed);
++int TSI_PRNG_Gen_Random(uint32_t *rnd_w0, uint32_t *rnd_w1);
++int TSI_PRNG_Gen_Random_Mass(uint32_t wcnt, uint32_t dest_addr);
++int TSI_PRNG_GenTo_KS_SRAM(uint32_t owner, int is_ecdsa, int is_ecdh,
++			   uint32_t keysz, int *key_num);
++int TSI_AES_Set_Mode(int sid, int kinswap, int koutswap, int inswap,
++		     int outswap, int sm4en, int encrypt, int mode,
++		     int keysz, int ks, int ks_num);
++int TSI_AES_Set_IV(int sid, uint32_t iv_addr);
++int TSI_AES_Set_Key(int sid, int keysz, uint32_t key_addr);
++int TSI_AES_Run(int sid, int is_last, int data_cnt, uint32_t src_addr,
++		uint32_t dest_addr);
++int TSI_AES_Run_RM(uint32_t aes_map_addr, uint32_t aes_ksctl);
++int TSI_AES_GCM_Run(int sid, int is_last, int data_cnt, uint32_t param_addr);
++int TSI_Access_Feedback(int sid, int rw, int wcnt, uint32_t fdbck_addr);
++int TSI_SHA_Start(int sid, int inswap, int outswap, int mode_sel, int hmac,
++		int mode, int keylen, int ks, int ks_num);
++int TSI_SHA_Update(int sid, int data_cnt, uint32_t src_addr);
++int TSI_SHA_Finish(int sid, int wcnt, int data_cnt, uint32_t src_addr,
++		uint32_t dest_addr);
++int TSI_SHA_All_At_Once(int inswap, int outswap, int mode_sel, int mode,
++		int wcnt, int data_cnt, uint32_t src_addr,
++		uint32_t dest_addr);
++int TSI_ECC_GenPublicKey(int curve_id, int is_ecdh, int psel,
++		int d_knum, uint32_t priv_key, uint32_t pub_key);
++int TSI_ECC_GenSignature(int curve_id, int rsel, int psel, int key_idx,
++		uint32_t param_addr, uint32_t sig_addr);
++int TSI_ECC_VerifySignature(int curve_id, int psel, int x_knum,
++		int y_knum, uint32_t param_addr);
++int TSI_ECC_Multiply(int curve_id, int type, int msel, int sps, int m_knum,
++		     int x_knum, int y_knum, uint32_t param_addr,
++		     uint32_t dest_addr);
++int TSI_RSA_Exp_Mod(int rsa_len, int crt, int esel, int e_knum,
++		    uint32_t param_addr, uint32_t dest_addr);
++int  TSI_KS_Write_SRAM(uint32_t u32Meta, uint32_t au32Key[],
++		       uint32_t *iKeyNum);
++int  TSI_KS_Write_OTP(int KeyNum, uint32_t u32Meta, uint32_t au32Key[]);
++int  TSI_KS_Read(int eType, int32_t i32KeyIdx, uint32_t au32Key[],
++		 uint32_t u32WordCnt);
++int  TSI_KS_RevokeKey(int eType, int32_t i32KeyIdx);
++int  TSI_KS_EraseKey(int eType, int32_t i32KeyIdx);
++int  TSI_KS_EraseAll(void);
++int  TSI_KS_GetRemainSize(uint32_t *remain_size);
++int  TSI_KS_GetStatus(uint32_t *ks_sts, uint32_t *ks_otpsts,
++		      uint32_t *ks_metadata);
++int  TSI_OTP_Read(uint32_t u32Addr, uint32_t *u32Data);
++
++#endif	/* __TSI_CMD_H__ */
+diff --git a/core/arch/arm/plat-nuvoton/tsi_patch.c b/core/arch/arm/plat-nuvoton/tsi_patch.c
+new file mode 100755
+index 0000000..6b17e5a
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/tsi_patch.c
+@@ -0,0 +1,234 @@
++__aligned(64) static unsigned char tsi_patch_image[] = {
++	0x61, 0xc3, 0x66, 0xe4, 0x7a, 0x7a, 0x1b, 0x05, 0x2b, 0x43, 0x46, 0xc8, 0xe1, 0x40, 0x40, 0x74,
++	0x9b, 0xdb, 0xb8, 0x0c, 0xd0, 0xab, 0x9a, 0x55, 0x0a, 0x5f, 0xfb, 0x2d, 0x96, 0xcb, 0x0a, 0xa1,
++	0x6f, 0x1a, 0xaf, 0x9c, 0x0d, 0xf4, 0xd1, 0x77, 0xb8, 0x1e, 0x4a, 0xf5, 0x84, 0x08, 0x58, 0x26,
++	0xa8, 0x18, 0xb9, 0xb9, 0x7a, 0xcf, 0x56, 0xe7, 0xe9, 0x2d, 0xa8, 0xb6, 0xce, 0x1c, 0x38, 0x99,
++	0xfc, 0x9e, 0xfb, 0xf7, 0x64, 0x95, 0x4a, 0xf6, 0x80, 0xf2, 0x5b, 0x09, 0xe4, 0xde, 0xbe, 0x0c,
++	0xa3, 0x86, 0x9f, 0x68, 0xf1, 0x2a, 0x6f, 0x92, 0x8d, 0x2b, 0xaf, 0x4d, 0xb8, 0xb7, 0xe8, 0x3a,
++	0xff, 0x95, 0xd4, 0xf6, 0xd0, 0x41, 0x67, 0x3b, 0x17, 0x3c, 0xbe, 0x14, 0xac, 0x43, 0xfa, 0x3e,
++	0x6d, 0x1f, 0x08, 0xc7, 0xe7, 0x88, 0x89, 0x89, 0x86, 0x7f, 0xf0, 0x9b, 0xc3, 0x19, 0xb2, 0x3e,
++	0x21, 0x1a, 0x6d, 0x95, 0x35, 0xe1, 0x76, 0x25, 0x3e, 0xa8, 0x40, 0xee, 0x5e, 0x66, 0x00, 0x37,
++	0x68, 0xaf, 0xff, 0xbd, 0x89, 0x1e, 0xd8, 0x3a, 0x98, 0x10, 0x89, 0x89, 0xb6, 0x37, 0x1a, 0xeb,
++	0x6d, 0x82, 0xc7, 0xf4, 0xe3, 0x96, 0x2b, 0xe7, 0x4e, 0x31, 0x2c, 0xe2, 0x65, 0x19, 0x59, 0x99,
++	0xbd, 0xf6, 0x57, 0xca, 0x02, 0x7e, 0x88, 0x70, 0x7b, 0xe8, 0x71, 0xd8, 0x6f, 0x33, 0x1b, 0x76,
++	0x41, 0xb5, 0xed, 0xd4, 0x0c, 0x2f, 0xb3, 0x23, 0x15, 0xba, 0xe5, 0x68, 0xfc, 0x96, 0x17, 0xc8,
++	0x01, 0x63, 0x7b, 0x0e, 0x84, 0xf9, 0xfa, 0x4a, 0xd1, 0x4c, 0xe3, 0xff, 0x63, 0xa1, 0xa4, 0x90,
++	0x11, 0x8b, 0x53, 0x65, 0x32, 0x24, 0xff, 0x7a, 0x05, 0xe8, 0xf8, 0x0a, 0x87, 0xc6, 0x44, 0x7c,
++	0x96, 0x22, 0xc8, 0xe8, 0x15, 0xd2, 0xb3, 0xa9, 0xc7, 0x1e, 0x57, 0x9d, 0xe1, 0x07, 0x6e, 0x34,
++	0x6e, 0x4b, 0x36, 0xe0, 0x55, 0x08, 0x46, 0xe9, 0x3d, 0x02, 0x78, 0xef, 0x01, 0x0d, 0x9e, 0xfc,
++	0xdd, 0xce, 0x2e, 0x41, 0x92, 0x32, 0x9b, 0x0d, 0x57, 0x4c, 0xb4, 0x2f, 0xf7, 0x80, 0x1a, 0x40,
++	0xfa, 0xfc, 0x7b, 0xdc, 0xb6, 0xf3, 0x48, 0xbb, 0x0e, 0x01, 0x18, 0xce, 0x75, 0xf7, 0x10, 0x04,
++	0x7b, 0x0e, 0x7f, 0x9b, 0x05, 0x3e, 0xf3, 0xf4, 0x77, 0xed, 0xf6, 0x97, 0x55, 0x2f, 0x71, 0x87,
++	0x49, 0x33, 0xab, 0x41, 0xe6, 0x0e, 0x52, 0x69, 0x28, 0xce, 0xef, 0xed, 0xef, 0xdb, 0x34, 0xcf,
++	0x96, 0xfb, 0xd8, 0x49, 0x6b, 0xf1, 0x80, 0xff, 0x91, 0x0e, 0xab, 0xc3, 0x2c, 0x70, 0x1e, 0x8c,
++	0x0b, 0xe8, 0x24, 0x01, 0x6d, 0xce, 0x49, 0xe0, 0x4c, 0xae, 0x28, 0x7d, 0xde, 0x36, 0xc8, 0x02,
++	0x42, 0x9a, 0x0e, 0x77, 0xa7, 0xa6, 0x3b, 0x59, 0x06, 0xf2, 0xd7, 0x69, 0x40, 0x7b, 0x0f, 0xb6,
++	0x8d, 0x2a, 0xab, 0xc5, 0xe8, 0xd1, 0x46, 0x7f, 0x35, 0x6e, 0x4f, 0xfa, 0xad, 0xd9, 0x14, 0x26,
++	0xf0, 0x0c, 0x7a, 0x97, 0x92, 0x31, 0x1c, 0x0f, 0x22, 0x6e, 0xb5, 0xf5, 0x39, 0xc1, 0xc7, 0x1a,
++	0x59, 0x20, 0x92, 0xab, 0xeb, 0xc3, 0x29, 0xca, 0xe9, 0xcd, 0xa1, 0xa7, 0x59, 0xac, 0xde, 0xa0,
++	0x57, 0xd2, 0xd2, 0x57, 0x26, 0x49, 0x63, 0x98, 0x1f, 0x76, 0xba, 0xb1, 0x2f, 0x68, 0x3c, 0x82,
++	0xca, 0xcc, 0x30, 0x3a, 0xc6, 0xb0, 0xd8, 0xd8, 0xaf, 0x7d, 0xff, 0x36, 0x57, 0xa5, 0xd1, 0x42,
++	0xeb, 0xa3, 0xb4, 0xc4, 0x40, 0x50, 0x8c, 0x3e, 0x35, 0x8e, 0x23, 0xb7, 0xf4, 0x43, 0xb9, 0x39,
++	0x48, 0x1a, 0x79, 0x95, 0xa3, 0xd0, 0x03, 0xda, 0x4f, 0x09, 0x24, 0x9b, 0x31, 0xa4, 0xe5, 0x9d,
++	0xc4, 0xbb, 0xf9, 0xb9, 0x2b, 0x64, 0x66, 0xaa, 0x10, 0x69, 0x9d, 0xb6, 0xc4, 0x1a, 0x02, 0x8e,
++	0x07, 0x76, 0x06, 0x60, 0x9e, 0x33, 0xba, 0x5f, 0xfa, 0xef, 0x57, 0x38, 0x2e, 0x8c, 0x4a, 0x2b,
++	0xcf, 0x1f, 0x3c, 0x31, 0x0b, 0x46, 0x63, 0xce, 0xe6, 0xbd, 0x18, 0x82, 0xa5, 0x3e, 0x0a, 0x05,
++	0x23, 0xbe, 0xe6, 0xe7, 0xd6, 0xf9, 0xd8, 0x1a, 0x12, 0x0f, 0xad, 0x9c, 0x85, 0x76, 0xf4, 0xd0,
++	0x27, 0x2b, 0x3b, 0xe5, 0xb6, 0x7a, 0xad, 0xd7, 0x77, 0x04, 0x77, 0xe2, 0x4a, 0xac, 0x42, 0xb3,
++	0xa3, 0x2d, 0x98, 0xb9, 0x91, 0x97, 0xf0, 0xfe, 0x57, 0x11, 0xc8, 0xcd, 0xd8, 0x6e, 0x73, 0xb9,
++	0x24, 0x9e, 0x22, 0x52, 0xc5, 0xd5, 0xa9, 0x07, 0xcd, 0x2e, 0x9c, 0xdd, 0xe8, 0x12, 0x91, 0xe1,
++	0x2f, 0xcb, 0xeb, 0xdf, 0x7d, 0xb2, 0x62, 0x94, 0x3d, 0xa1, 0x1d, 0x37, 0x80, 0x22, 0x2e, 0x47,
++	0xaf, 0xe5, 0xda, 0x0c, 0x2e, 0x42, 0x45, 0xd8, 0xeb, 0x83, 0xe6, 0x25, 0x46, 0x95, 0x50, 0xd8,
++	0x10, 0xa5, 0x03, 0xe2, 0xd1, 0x79, 0xe6, 0x9b, 0x85, 0x31, 0x04, 0x39, 0x49, 0x0e, 0x5e, 0xda,
++	0x1e, 0x7c, 0xed, 0x86, 0xe0, 0xe4, 0x84, 0x9e, 0x98, 0xf5, 0x3b, 0xe7, 0xd9, 0x55, 0xe2, 0x75,
++	0xa0, 0x4c, 0xbd, 0xfa, 0x6e, 0xff, 0x13, 0x78, 0xbf, 0xa2, 0x64, 0xf3, 0x86, 0xcd, 0xb7, 0x0e,
++	0xe1, 0x72, 0xf1, 0x14, 0xe4, 0xce, 0xcb, 0x45, 0xb1, 0x7f, 0xd9, 0x40, 0xd6, 0xd2, 0xbf, 0x65,
++	0xb2, 0x5f, 0xf1, 0x51, 0xa2, 0x8f, 0x42, 0x2b, 0x9d, 0x46, 0xb4, 0x6d, 0xb1, 0xbf, 0x2c, 0xf9,
++	0xc2, 0xf1, 0xb7, 0x9e, 0x81, 0xdd, 0x95, 0x7b, 0xcc, 0x7c, 0xf0, 0x18, 0xe6, 0xeb, 0xe4, 0xc8,
++	0x59, 0x54, 0x7b, 0x9a, 0xb9, 0x43, 0x53, 0x2a, 0xa8, 0x6a, 0x7f, 0x03, 0xa0, 0xc8, 0xdd, 0xe6,
++	0xa9, 0x32, 0x65, 0x53, 0x5d, 0x36, 0x0a, 0x11, 0xda, 0x51, 0x28, 0x5f, 0x02, 0x0b, 0x7b, 0xea,
++	0x3a, 0xaa, 0xe6, 0x7c, 0x26, 0x74, 0xf5, 0x1c, 0x51, 0x56, 0xd6, 0xdc, 0xdf, 0x05, 0x07, 0xd7,
++	0x6e, 0x3c, 0x6e, 0xf8, 0x22, 0x8d, 0x4e, 0x15, 0xb6, 0x14, 0xf6, 0x1c, 0xc4, 0x85, 0xce, 0x46,
++	0xee, 0x42, 0xf2, 0x77, 0x92, 0x84, 0xf9, 0x4a, 0x9a, 0xa0, 0x0c, 0x73, 0xf2, 0xd6, 0xfb, 0x79,
++	0x8a, 0xb8, 0x40, 0x58, 0xab, 0x35, 0x52, 0x0f, 0xb6, 0xaf, 0xa8, 0x75, 0x27, 0xda, 0x07, 0xdd,
++	0xb6, 0x40, 0xcb, 0x95, 0x36, 0x98, 0xc8, 0xce, 0xa5, 0x2a, 0x69, 0x5d, 0x23, 0xfa, 0xee, 0xd1,
++	0x7f, 0x63, 0x2d, 0x2e, 0xd2, 0x3e, 0x19, 0x21, 0x2e, 0xbb, 0xb4, 0x1d, 0x57, 0x37, 0xd4, 0x77,
++	0x05, 0x19, 0x07, 0x35, 0xdd, 0x11, 0xc3, 0xa0, 0x48, 0x30, 0xc8, 0xee, 0xb8, 0x90, 0x2b, 0x1b,
++	0xca, 0xb1, 0x47, 0xd7, 0xf9, 0x16, 0x7b, 0xb2, 0x54, 0x6d, 0x63, 0x35, 0x1c, 0x33, 0x18, 0xff,
++	0x1d, 0xa3, 0xb0, 0x33, 0x15, 0x53, 0x95, 0xe3, 0x1f, 0xbe, 0x99, 0xa0, 0x97, 0xf9, 0xe3, 0x65,
++	0x7a, 0x6e, 0x66, 0xe8, 0xe5, 0x72, 0x47, 0x00, 0x6f, 0xae, 0x96, 0xce, 0xce, 0x92, 0x28, 0x89,
++	0x19, 0x4f, 0x52, 0x3f, 0x8b, 0x4c, 0xae, 0xdf, 0xec, 0xf0, 0x9f, 0x1f, 0x20, 0xed, 0x15, 0x86,
++	0x04, 0x3e, 0xf0, 0x8f, 0x27, 0x5a, 0xdf, 0xd1, 0xf0, 0xcc, 0x45, 0xf5, 0x68, 0x41, 0x01, 0x95,
++	0xb7, 0x3b, 0x27, 0xdb, 0xec, 0x3a, 0xc8, 0x41, 0xb0, 0xe9, 0xbd, 0x1f, 0x9c, 0x36, 0x54, 0x0a,
++	0xcd, 0x23, 0xdd, 0x1e, 0x76, 0x8e, 0x8b, 0x49, 0x28, 0xf2, 0x51, 0xce, 0x44, 0x11, 0x36, 0xc0,
++	0xeb, 0xe0, 0x33, 0x90, 0x9e, 0xd0, 0x8c, 0xb5, 0x8d, 0x68, 0x74, 0xc6, 0x97, 0x57, 0x8c, 0xed,
++	0x10, 0x82, 0x18, 0x89, 0x74, 0x83, 0x6f, 0xe0, 0x42, 0x04, 0xa2, 0xdf, 0xa4, 0x66, 0x6d, 0xe1,
++	0x1a, 0x79, 0x5a, 0x0d, 0xf2, 0xfb, 0x5f, 0x39, 0x95, 0x16, 0x0f, 0xc1, 0x5d, 0xfe, 0x70, 0x1d,
++	0x14, 0x16, 0xdb, 0x16, 0xed, 0x39, 0x55, 0xb5, 0xa4, 0xe6, 0xce, 0x0e, 0xc1, 0x9d, 0x1b, 0xad,
++	0xa2, 0xf5, 0xf6, 0x73, 0xca, 0x02, 0x9d, 0x27, 0x8f, 0x94, 0xfa, 0xca, 0x9f, 0x0d, 0x22, 0xc9,
++	0xe6, 0xd9, 0x65, 0x1e, 0x18, 0x43, 0x5c, 0x35, 0xed, 0x3e, 0x5f, 0xab, 0x83, 0xba, 0xbf, 0x74,
++	0x52, 0x4b, 0x39, 0x96, 0x96, 0x5e, 0xef, 0x2c, 0x17, 0x5c, 0xbb, 0x44, 0x9f, 0xdd, 0x11, 0x8e,
++	0xbd, 0x43, 0x99, 0x96, 0xd9, 0x70, 0xdb, 0xa1, 0xc0, 0xfe, 0xe1, 0xca, 0x21, 0xa4, 0x5c, 0xde,
++	0xbf, 0x44, 0x4c, 0x26, 0x1b, 0x0e, 0xad, 0x68, 0xff, 0x3f, 0x64, 0x82, 0x4e, 0xf7, 0xec, 0x0f,
++	0x40, 0x63, 0x8e, 0x6a, 0x60, 0xe2, 0x4e, 0x37, 0xf3, 0xfb, 0x20, 0x1a, 0xcd, 0x68, 0xc9, 0x66,
++	0x2c, 0x63, 0xa2, 0x69, 0x33, 0x41, 0xc1, 0xf5, 0x56, 0xc0, 0x75, 0x35, 0xc8, 0x24, 0xdd, 0xb3,
++	0xb6, 0x23, 0x79, 0xac, 0xe8, 0x86, 0x56, 0xa7, 0x5c, 0x00, 0x2d, 0x83, 0x5a, 0x8c, 0x8c, 0xaa,
++	0x7c, 0x02, 0xfc, 0x90, 0xa3, 0x19, 0x22, 0xd3, 0xca, 0x11, 0xcb, 0xef, 0xd3, 0x76, 0x6a, 0xb1,
++	0xba, 0xb4, 0xff, 0x78, 0x4c, 0xf8, 0x06, 0xfd, 0xeb, 0x98, 0xeb, 0xcd, 0x34, 0x19, 0xdf, 0xde,
++	0xbc, 0x46, 0x32, 0x5a, 0x7f, 0x77, 0xd1, 0xff, 0x76, 0x75, 0x8a, 0x1c, 0x69, 0xb4, 0xd5, 0xe0,
++	0x3a, 0x70, 0x85, 0x67, 0xfe, 0x6b, 0x5e, 0x64, 0xff, 0x27, 0x1a, 0xa3, 0xca, 0x74, 0x2e, 0x58,
++	0x63, 0x36, 0xa9, 0xf2, 0xd8, 0x0f, 0x62, 0xf7, 0x44, 0xde, 0xf6, 0x0b, 0x30, 0x61, 0x97, 0x3b,
++	0xb7, 0x8f, 0x01, 0xa1, 0xf0, 0x13, 0x1c, 0x4a, 0x54, 0xf7, 0x4e, 0x34, 0xf2, 0xde, 0x6e, 0x16,
++	0x89, 0x4c, 0x3b, 0xde, 0xf3, 0xbb, 0x42, 0xd9, 0x4f, 0xa3, 0x64, 0x4a, 0x95, 0xa3, 0x20, 0x9c,
++	0x8f, 0x66, 0xdb, 0xea, 0x00, 0x0a, 0x75, 0x86, 0xf5, 0x52, 0xc2, 0x45, 0x1e, 0xe4, 0x19, 0xca,
++	0xd2, 0xc9, 0x8e, 0xba, 0x47, 0xd9, 0xc2, 0x50, 0x19, 0x21, 0x0b, 0x31, 0x7f, 0xec, 0x6d, 0xee,
++	0x5e, 0x6e, 0x7b, 0xa7, 0xe5, 0xc4, 0x95, 0xad, 0x3c, 0xec, 0xc9, 0xbe, 0x7e, 0x2c, 0x8a, 0x4a,
++	0xe7, 0x1c, 0x31, 0x83, 0xc5, 0xbb, 0x0f, 0x09, 0xa8, 0xc7, 0xaf, 0x17, 0x16, 0x7e, 0xee, 0x29,
++	0x13, 0x7d, 0xce, 0xad, 0xd6, 0x5d, 0x74, 0xdc, 0xbb, 0x60, 0x7a, 0x1e, 0xdb, 0xe6, 0x56, 0x31,
++	0x45, 0x3c, 0xec, 0xd5, 0xf1, 0x6d, 0xed, 0x03, 0x3a, 0x60, 0xa2, 0xfe, 0x62, 0x5b, 0x09, 0xe4,
++	0xa7, 0x0d, 0x5d, 0x5f, 0xe6, 0xc8, 0xfe, 0x91, 0x9b, 0xda, 0x9d, 0x27, 0x32, 0xc7, 0x4d, 0x90,
++	0xf1, 0x2a, 0x04, 0x51, 0xb4, 0x2b, 0x43, 0xfa, 0x56, 0x72, 0x55, 0x6e, 0xbe, 0xad, 0x64, 0x62,
++	0xe1, 0xcb, 0x92, 0x9a, 0x98, 0x79, 0xac, 0x68, 0x89, 0x73, 0x02, 0x61, 0x43, 0x9b, 0x5a, 0xcd,
++	0x9b, 0xb2, 0xbe, 0x1f, 0x77, 0xf2, 0xc6, 0x32, 0xe1, 0xae, 0x89, 0x5f, 0x33, 0x7b, 0x98, 0x65,
++	0xa1, 0x17, 0x42, 0x2a, 0x39, 0x62, 0xfc, 0xee, 0x70, 0xdd, 0x54, 0xce, 0x72, 0x23, 0xc2, 0xd2,
++	0x13, 0xbb, 0xdf, 0x49, 0xd3, 0xdc, 0x6c, 0xe8, 0x31, 0x90, 0x58, 0x29, 0xc6, 0x52, 0xf5, 0x44,
++	0x2c, 0x57, 0x85, 0x88, 0x64, 0x4d, 0x39, 0x91, 0xaf, 0x6b, 0x74, 0xb9, 0x60, 0x8d, 0xce, 0x1e,
++	0x62, 0x3c, 0xc3, 0x6a, 0xf7, 0xcc, 0xb1, 0x66, 0x3e, 0x02, 0x88, 0xd3, 0x69, 0xef, 0xc6, 0xb7,
++	0x64, 0x2b, 0x3b, 0x6d, 0xca, 0x52, 0xac, 0x8c, 0xa9, 0xbc, 0x65, 0x13, 0xbd, 0x39, 0x9b, 0x8f,
++	0xe9, 0x25, 0xff, 0x73, 0x70, 0x8d, 0x3e, 0x65, 0x0f, 0x77, 0x63, 0x4e, 0x0f, 0xb5, 0x7a, 0xdd,
++	0xec, 0x8a, 0xa0, 0x5d, 0xf0, 0xf3, 0x33, 0xe8, 0xb6, 0xfa, 0x71, 0x9c, 0xc5, 0x14, 0x22, 0x8d,
++	0x2b, 0xb3, 0x4a, 0x31, 0x91, 0x6f, 0x4f, 0x5a, 0xbf, 0xd6, 0x42, 0x73, 0xd1, 0x45, 0x54, 0x7f,
++	0x8c, 0x88, 0xa1, 0x4a, 0xcb, 0x67, 0x84, 0xe2, 0x28, 0xee, 0x71, 0x03, 0x05, 0x12, 0x79, 0xca,
++	0x51, 0xa2, 0x78, 0xce, 0x41, 0x10, 0xa6, 0x2b, 0xf8, 0xa7, 0xac, 0x5d, 0x3e, 0x3f, 0xea, 0x48,
++	0x8b, 0x19, 0xea, 0x0b, 0x11, 0x3e, 0xf0, 0x14, 0x26, 0xc2, 0x88, 0x4e, 0x5a, 0x53, 0x5c, 0x73,
++	0x1a, 0x55, 0xe0, 0x2b, 0x43, 0x89, 0xed, 0x96, 0x8c, 0xc9, 0xd6, 0x41, 0xb5, 0x86, 0xdd, 0xcd,
++	0x08, 0xc5, 0xff, 0x38, 0x64, 0x90, 0x9f, 0x79, 0xe3, 0x8c, 0xc2, 0x0d, 0x8b, 0x96, 0x6e, 0x6e,
++	0x50, 0x79, 0x2a, 0x20, 0x01, 0xe7, 0x17, 0x89, 0xaf, 0x58, 0xbc, 0xf0, 0x9a, 0xc3, 0x77, 0x59,
++	0x23, 0xc9, 0xd2, 0x5f, 0xe7, 0x2a, 0x62, 0x96, 0xa8, 0xc3, 0xd1, 0x65, 0xd5, 0x49, 0xc6, 0x5c,
++	0xf3, 0x0f, 0xdb, 0xb4, 0x38, 0x81, 0x57, 0x5e, 0xb7, 0xf8, 0xc3, 0x44, 0xaf, 0x20, 0x7b, 0x40,
++	0xfa, 0x9d, 0xb2, 0xc2, 0x82, 0x54, 0xdd, 0xdf, 0xd5, 0x9f, 0x9a, 0x3a, 0xcf, 0x73, 0x25, 0xd2,
++	0xa3, 0x6d, 0x6e, 0xd6, 0x42, 0x0b, 0x3c, 0x75, 0x09, 0x69, 0x8e, 0x39, 0x40, 0x04, 0x00, 0xdd,
++	0xc1, 0x22, 0x8b, 0x47, 0x4f, 0x53, 0xb8, 0x77, 0x70, 0xe6, 0xca, 0xf9, 0x8a, 0xeb, 0x62, 0x83,
++	0x64, 0xa4, 0x13, 0x18, 0x3f, 0x9d, 0x09, 0x33, 0xd0, 0xd3, 0x3e, 0xb6, 0x7d, 0x8f, 0x4c, 0xf1,
++	0x77, 0xf9, 0xa3, 0x99, 0x36, 0x2b, 0x99, 0x5d, 0xa1, 0x99, 0x13, 0x5e, 0xb2, 0xb7, 0x7e, 0x6f,
++	0x4d, 0x5e, 0x1e, 0x3c, 0x42, 0xef, 0xb0, 0x66, 0x6d, 0x3b, 0xb5, 0xc7, 0x46, 0xae, 0x5d, 0x24,
++	0x47, 0x9c, 0x6b, 0x59, 0x3c, 0x70, 0x55, 0xce, 0x1f, 0x24, 0x36, 0x8d, 0x86, 0x93, 0x45, 0x8e,
++	0x0b, 0x95, 0xb6, 0x36, 0x9b, 0x4a, 0x5b, 0x0c, 0xc3, 0x75, 0x6f, 0xbe, 0xcf, 0x97, 0x61, 0x14,
++	0x30, 0xf9, 0x3f, 0xf5, 0xf7, 0xe7, 0x7f, 0xd9, 0x47, 0x2e, 0xb6, 0xb2, 0x2c, 0x32, 0x96, 0xdc,
++	0x28, 0x1a, 0xda, 0xdb, 0x52, 0xec, 0x54, 0xd4, 0xc1, 0x12, 0x2b, 0xb1, 0x7a, 0x40, 0xf0, 0x74,
++	0x46, 0x26, 0xf1, 0x24, 0xc3, 0x9f, 0x6d, 0x79, 0x54, 0x07, 0xa3, 0x52, 0xe1, 0xb0, 0xf4, 0x4f,
++	0xad, 0x16, 0xc9, 0xb5, 0x8f, 0xb3, 0x78, 0x71, 0xf9, 0x71, 0xa4, 0x56, 0xe5, 0xea, 0x92, 0x2b,
++	0x92, 0x1e, 0x86, 0x9a, 0x8d, 0x3f, 0xff, 0xac, 0x4e, 0x0a, 0x44, 0xb5, 0x6e, 0xf6, 0x67, 0x34,
++	0x68, 0x49, 0x4f, 0xd1, 0x88, 0x97, 0x5a, 0x4a, 0x98, 0x0d, 0xf6, 0x46, 0x27, 0x3d, 0xb5, 0x9e,
++	0xf1, 0x7d, 0x65, 0x6f, 0x56, 0x3b, 0x7d, 0xcd, 0xbc, 0x53, 0xef, 0x1b, 0xf4, 0xb5, 0x8c, 0xc1,
++	0xaf, 0x54, 0x3a, 0x00, 0x61, 0x64, 0x10, 0x28, 0xc4, 0x8d, 0x09, 0xe0, 0x7c, 0xc2, 0xd6, 0x22,
++	0xcc, 0x93, 0xec, 0x7e, 0xcc, 0xb8, 0xd8, 0xca, 0x65, 0xbc, 0xc3, 0x89, 0x3d, 0x32, 0x58, 0xa7,
++	0x60, 0x14, 0x42, 0x0e, 0xa8, 0x0c, 0xb4, 0x12, 0xfa, 0xf3, 0x81, 0x78, 0x27, 0xa8, 0x32, 0xc8,
++	0x41, 0x15, 0xa1, 0x37, 0xd4, 0x39, 0x99, 0x2e, 0xa8, 0x5c, 0xc3, 0x6f, 0x03, 0xc6, 0x72, 0x3a,
++	0x70, 0xc8, 0x8f, 0x1b, 0xbf, 0xaf, 0x11, 0xd1, 0xd6, 0xcd, 0x0e, 0x11, 0x9e, 0x90, 0xf0, 0x63,
++	0xd5, 0xe9, 0xb2, 0xc1, 0x23, 0x90, 0xa0, 0x41, 0xd1, 0x10, 0x3c, 0x9d, 0x4c, 0xb1, 0x07, 0x9e,
++	0x33, 0xa4, 0xe8, 0x06, 0x74, 0x16, 0x19, 0x8b, 0xa2, 0xf8, 0x21, 0xa4, 0xf2, 0xb3, 0x02, 0xd1,
++	0x8e, 0x3f, 0xde, 0x45, 0x75, 0x92, 0x6d, 0x19, 0x74, 0x43, 0x78, 0xd3, 0xbc, 0x8e, 0x24, 0x27,
++	0xba, 0x20, 0x3e, 0xc8, 0x3a, 0xec, 0xe7, 0x4a, 0x25, 0xb6, 0xa4, 0x90, 0x59, 0xa2, 0x7d, 0x10,
++	0x63, 0xd3, 0x04, 0xef, 0xb9, 0x3a, 0x65, 0x69, 0xd8, 0x74, 0xdb, 0x2a, 0xbb, 0x03, 0x2e, 0x9c,
++	0xbf, 0x84, 0x41, 0xf3, 0x0f, 0x39, 0xb6, 0x79, 0x3a, 0xe7, 0xbe, 0xee, 0xa7, 0x5c, 0x1d, 0x6b,
++	0xf9, 0x92, 0xe1, 0xf9, 0x7b, 0xa7, 0x2c, 0x9d, 0x92, 0xd2, 0xd6, 0xc9, 0x31, 0x6a, 0x69, 0xf7,
++	0xff, 0x43, 0xa1, 0x04, 0xee, 0x21, 0xf5, 0x71, 0x97, 0x30, 0x1a, 0xe1, 0x6e, 0x58, 0xcc, 0x22,
++	0x53, 0x0d, 0x40, 0x82, 0xb7, 0xc1, 0xc3, 0x3b, 0xa6, 0x43, 0x9f, 0xfe, 0x1a, 0x1d, 0x50, 0xfa,
++	0x2a, 0x9c, 0xd5, 0xd6, 0x36, 0x25, 0x1b, 0x37, 0x5f, 0x2f, 0xdc, 0x17, 0xe0, 0x33, 0xc7, 0x1f,
++	0x67, 0x68, 0x28, 0x03, 0x4a, 0x0b, 0xc9, 0xb6, 0xa6, 0x70, 0x46, 0x37, 0x0f, 0xb7, 0xd5, 0xaa,
++	0x54, 0x96, 0x49, 0x6b, 0x13, 0x58, 0x24, 0x94, 0x97, 0xa1, 0xee, 0xae, 0xb9, 0xcc, 0xbf, 0xb0,
++	0xb8, 0xb3, 0x22, 0xe6, 0xb2, 0x29, 0xa0, 0xd5, 0x3e, 0xcf, 0xa0, 0xec, 0xf5, 0xee, 0x53, 0xe4,
++	0xa9, 0xbf, 0xa2, 0x67, 0xdd, 0x27, 0xc3, 0x55, 0x0f, 0xff, 0xab, 0x69, 0x38, 0xcc, 0x4c, 0x09,
++	0x0f, 0x72, 0xa8, 0xda, 0x85, 0x63, 0x30, 0x76, 0x1a, 0xcd, 0x76, 0x33, 0x42, 0x1c, 0xf2, 0x7b,
++	0xb8, 0xf7, 0xbc, 0x84, 0x1c, 0x93, 0xc0, 0x25, 0x5c, 0xf6, 0x93, 0x49, 0x14, 0xda, 0x82, 0x68,
++	0x3f, 0x32, 0x02, 0xcc, 0xf0, 0xc8, 0x42, 0x84, 0x36, 0x69, 0x4d, 0xa9, 0x23, 0x77, 0xd8, 0x38,
++	0x17, 0x47, 0x2a, 0x11, 0xbd, 0x83, 0x31, 0x83, 0xa7, 0x3f, 0x06, 0x66, 0xf9, 0x41, 0x70, 0x2b,
++	0xb7, 0xbe, 0x72, 0xaf, 0x89, 0x1c, 0x54, 0xe2, 0x0e, 0xe5, 0x53, 0xd2, 0x9e, 0x24, 0x83, 0x7e,
++	0x6f, 0x3b, 0x30, 0x74, 0x66, 0x7a, 0x15, 0x3f, 0x02, 0x91, 0xc8, 0x29, 0xff, 0x03, 0x9e, 0x37,
++	0x6d, 0x9b, 0x98, 0x04, 0x72, 0xbd, 0xac, 0x13, 0xda, 0x3b, 0x41, 0x31, 0x0b, 0x12, 0x96, 0xbb,
++	0x1f, 0xe6, 0x9d, 0x54, 0x83, 0x7c, 0x5c, 0x07, 0x9b, 0x6e, 0xa6, 0x0a, 0x92, 0xa6, 0xd6, 0xab,
++	0x04, 0x15, 0x7f, 0x89, 0x42, 0xdd, 0x26, 0x07, 0x1f, 0x96, 0x82, 0xf2, 0x20, 0x23, 0xd4, 0xbf,
++	0xd1, 0x17, 0xc8, 0xae, 0x09, 0xf8, 0x41, 0xdc, 0xf5, 0x20, 0xbb, 0xd2, 0x61, 0x77, 0x6c, 0x4f,
++	0xc5, 0xd1, 0x07, 0x8a, 0xf0, 0x19, 0x1f, 0xde, 0xaf, 0x00, 0x94, 0x70, 0xc8, 0xca, 0x0e, 0xb1,
++	0x99, 0x9a, 0xa3, 0xc2, 0x58, 0x58, 0x74, 0x36, 0x88, 0x1a, 0x1e, 0xda, 0x23, 0x88, 0x96, 0x4b,
++	0xd7, 0xc2, 0x2c, 0x1d, 0xe4, 0x7c, 0x5a, 0x43, 0xe9, 0x65, 0x68, 0xb6, 0x0d, 0x08, 0xe5, 0xe4,
++	0x5e, 0x28, 0x86, 0x6b, 0xdf, 0x43, 0x12, 0xda, 0xd6, 0xa2, 0x10, 0xf7, 0xb0, 0x28, 0xd8, 0xef,
++	0x4e, 0x5a, 0x98, 0x89, 0x60, 0xd8, 0x01, 0xa8, 0x11, 0x71, 0xb7, 0x02, 0xdd, 0xba, 0x82, 0x0d,
++	0xdf, 0xe8, 0xb7, 0x4b, 0xaa, 0xae, 0x85, 0x77, 0x54, 0xc7, 0xb7, 0x84, 0x38, 0x34, 0x53, 0xb3,
++	0x92, 0x52, 0xa7, 0xb8, 0xa9, 0xfe, 0xde, 0xc7, 0xc0, 0x6b, 0x1e, 0x19, 0x83, 0x35, 0x14, 0xd7,
++	0x95, 0xb2, 0x55, 0xc8, 0xcf, 0x82, 0x50, 0xfc, 0x5a, 0x9f, 0xf1, 0xb3, 0x9b, 0xaf, 0xaa, 0x85,
++	0x6e, 0xea, 0xfa, 0xb8, 0x28, 0xef, 0xe3, 0xd8, 0xd2, 0x9a, 0x94, 0x5a, 0x48, 0xfd, 0x2c, 0xd6,
++	0x9e, 0xeb, 0x19, 0x8b, 0x0f, 0x10, 0xda, 0x51, 0xe4, 0x43, 0x9e, 0x3d, 0xbe, 0x12, 0x78, 0xf0,
++	0x55, 0xa6, 0x50, 0x04, 0xe7, 0x0e, 0x8a, 0xfc, 0x4b, 0x93, 0x74, 0x3b, 0x6c, 0xd8, 0x40, 0x8d,
++	0xd7, 0xb6, 0xc5, 0x97, 0xe2, 0x79, 0x53, 0x97, 0x65, 0x5e, 0xc6, 0x02, 0xb3, 0x18, 0x18, 0x9d,
++	0x5b, 0xec, 0xdc, 0x2d, 0xec, 0xdd, 0xa6, 0x2c, 0x36, 0x86, 0x31, 0xce, 0x19, 0xf8, 0xae, 0xbf,
++	0xa9, 0xfe, 0xe7, 0xd3, 0xe9, 0xe4, 0x64, 0xc6, 0x0f, 0x7e, 0xd9, 0xe6, 0xd0, 0xbd, 0x4c, 0x40,
++	0x9b, 0xfe, 0x4e, 0xdb, 0x7a, 0x0e, 0x4f, 0xaa, 0xf0, 0xf7, 0x53, 0xaa, 0xa4, 0x66, 0x9d, 0x72,
++	0x1e, 0x2c, 0x73, 0x97, 0x99, 0xa5, 0xeb, 0x47, 0xed, 0xb2, 0x7b, 0x6f, 0xa0, 0xb7, 0xc5, 0x6a,
++	0xb1, 0xd0, 0xf9, 0xca, 0xc1, 0xd6, 0xe0, 0x4a, 0x9e, 0xfa, 0xf2, 0xb8, 0x4a, 0x31, 0x02, 0x74,
++	0xf2, 0x9a, 0xa6, 0x45, 0x82, 0xe4, 0x48, 0xd2, 0xab, 0x3d, 0xf0, 0x1c, 0x10, 0xe3, 0x58, 0x4e,
++	0x3c, 0x97, 0xbf, 0x9c, 0x7f, 0xea, 0x4e, 0x98, 0xb7, 0xc6, 0x39, 0x52, 0xf9, 0xe2, 0x22, 0xaf,
++	0xc2, 0xfe, 0xac, 0x4f, 0x0b, 0x17, 0x05, 0x30, 0x9f, 0x5e, 0x6f, 0x25, 0x41, 0x7a, 0x3b, 0x6c,
++	0x63, 0xc5, 0x48, 0xf4, 0x3b, 0xa3, 0x84, 0xe6, 0x8b, 0x68, 0xd4, 0x84, 0x22, 0x0e, 0x65, 0x57,
++	0x16, 0x8f, 0xd8, 0x73, 0xa3, 0x0b, 0x0c, 0xef, 0x0a, 0x5a, 0xb0, 0x54, 0xe9, 0xdd, 0xbf, 0x4b,
++	0xdc, 0x98, 0x9b, 0x13, 0x3c, 0x9a, 0xa3, 0xea, 0x8e, 0x26, 0xc9, 0x0e, 0x4d, 0x67, 0x65, 0x8c,
++	0xec, 0x6d, 0x9e, 0xf9, 0xf0, 0x53, 0x38, 0xad, 0x91, 0x8c, 0x91, 0xe7, 0x54, 0xa2, 0xd3, 0x6f,
++	0x7e, 0xfb, 0xfb, 0xcd, 0x5f, 0xd2, 0xfc, 0x43, 0xe1, 0x2a, 0xf8, 0x26, 0xfc, 0xe4, 0xcb, 0x03,
++	0x19, 0x46, 0xb3, 0x35, 0xf2, 0x78, 0xde, 0x85, 0x2d, 0x2a, 0xdd, 0xa3, 0x71, 0x1b, 0xc9, 0xa9,
++	0x60, 0xac, 0x4b, 0x21, 0x1a, 0x5d, 0x5c, 0xae, 0x58, 0xde, 0x3d, 0xb9, 0x29, 0x6c, 0x2c, 0x86,
++	0x15, 0x88, 0xdb, 0xf6, 0xea, 0x46, 0xa1, 0x44, 0xaa, 0x27, 0xb8, 0xfa, 0xc3, 0xc5, 0xde, 0x9a,
++	0xb7, 0x54, 0xaa, 0x03, 0x48, 0x5a, 0x98, 0xca, 0x18, 0xf7, 0xa3, 0x81, 0xa8, 0x09, 0x04, 0x9f,
++	0x59, 0x02, 0x89, 0xca, 0x5e, 0xbc, 0xb2, 0x48, 0xc3, 0x2f, 0xbc, 0x97, 0x94, 0x28, 0x4b, 0xa0,
++	0xa9, 0x41, 0x0a, 0x9f, 0x34, 0xfd, 0x61, 0x8b, 0xdb, 0x6b, 0xb7, 0x89, 0xa7, 0x5c, 0x71, 0x53,
++	0x60, 0xca, 0x37, 0x47, 0x6f, 0x21, 0xdd, 0x00, 0x3c, 0x98, 0xe4, 0x04, 0x60, 0x0d, 0xa1, 0x5c,
++	0xdc, 0x7a, 0x81, 0x97, 0x85, 0x0f, 0x0a, 0x30, 0x7c, 0xe2, 0x6b, 0xdf, 0x62, 0x13, 0x12, 0xdf,
++	0x82, 0x28, 0x36, 0x9c, 0x6a, 0xaf, 0xd8, 0x04, 0x39, 0x09, 0xb7, 0xe1, 0xc1, 0x3b, 0xfe, 0x86,
++	0x86, 0xa9, 0x09, 0x26, 0xc2, 0x41, 0x99, 0x0c, 0xbf, 0xd3, 0x1c, 0xe3, 0x67, 0xff, 0xa0, 0xae,
++	0xda, 0xb4, 0x03, 0xc8, 0x93, 0xa0, 0x6c, 0xf0, 0xfc, 0xd9, 0x1c, 0xa1, 0x26, 0xc4, 0xb3, 0x4e,
++	0x49, 0x3a, 0xc3, 0xb6, 0xf2, 0xeb, 0xd4, 0x9d, 0x7c, 0xdf, 0x56, 0xd7, 0x8c, 0x81, 0xdf, 0x84,
++	0x95, 0x91, 0x70, 0xbd, 0x3f, 0xd9, 0x4a, 0xa0, 0x1e, 0xe2, 0x78, 0x6f, 0xa8, 0xa4, 0x88, 0x8a,
++	0x48, 0xab, 0xf8, 0x08, 0x43, 0xdc, 0xab, 0xfb, 0xab, 0x2e, 0x9d, 0x1d, 0xb6, 0xfb, 0xbb, 0x8f,
++	0xfc, 0x2d, 0x15, 0x5b, 0xa4, 0xd9, 0x51, 0xdb, 0xe5, 0x59, 0xe4, 0xfa, 0x0d, 0x87, 0xf6, 0x74,
++	0xda, 0x66, 0x24, 0xa4, 0xc5, 0x9d, 0x8a, 0xf4, 0xf9, 0x9b, 0x95, 0x08, 0x23, 0xf8, 0xdb, 0x4d,
++	0xca, 0xa0, 0xc8, 0x86, 0x85, 0x60, 0xdb, 0x94, 0x42, 0xe0, 0x91, 0x3b, 0x21, 0x11, 0x44, 0x0a,
++	0xd7, 0x6b, 0xfa, 0xf6, 0xe3, 0x2f, 0xac, 0x1f, 0xe2, 0x0c, 0x5e, 0x47, 0x4d, 0x8e, 0xb8, 0xf9,
++	0x06, 0x99, 0x9e, 0xe6, 0xdf, 0xa3, 0x30, 0x89, 0x16, 0xe7, 0x48, 0x38, 0xfd, 0xe9, 0xdc, 0xa6,
++	0xef, 0x08, 0x48, 0xb5, 0xe4, 0x62, 0xb0, 0xa8, 0x1c, 0xfc, 0xdc, 0xea, 0x24, 0xb0, 0x8d, 0x25,
++	0x66, 0xc7, 0x49, 0x41, 0x2c, 0x68, 0x33, 0xcf, 0xaf, 0x69, 0x2b, 0xcb, 0xfc, 0x46, 0x88, 0x7e,
++	0x6d, 0x7d, 0xc7, 0x78, 0xd4, 0x80, 0x86, 0xba, 0x25, 0x76, 0x8d, 0x5b, 0xa9, 0xb9, 0xe0, 0xe7,
++	0x70, 0xcc, 0xd1, 0xbc, 0x06, 0x97, 0xbe, 0x13, 0x3b, 0x8f, 0xf0, 0xe1, 0x3e, 0xa4, 0x0b, 0x6e,
++	0x16, 0x7c, 0x71, 0xed, 0x8a, 0x38, 0xa0, 0xe3, 0x23, 0x40, 0x16, 0xe8, 0x7d, 0x5f, 0xe9, 0x03,
++	0xfc, 0x18, 0x6e, 0x1b, 0x63, 0xb5, 0x14, 0xf0, 0x38, 0xb7, 0x53, 0x4a, 0x52, 0x42, 0x2f, 0x27,
++	0x35, 0x33, 0xb5, 0x53, 0xc9, 0x4c, 0x9f, 0xac, 0xac, 0xf1, 0x0e, 0x50, 0xb5, 0xdd, 0xb5, 0xaf,
++	0x56, 0x46, 0x94, 0x6a, 0xdd, 0x73, 0xc2, 0x7d, 0x41, 0x88, 0x0a, 0x1a, 0x22, 0x08, 0xf2, 0xf8,
++	0x69, 0x0d, 0xab, 0x89, 0xac, 0x62, 0xf9, 0x70, 0xf6, 0x59, 0xf8, 0x7a, 0xfe, 0xee, 0x41, 0x94,
++	0x7b, 0x5c, 0x66, 0x58, 0x5b, 0x24, 0xeb, 0x2b, 0xa3, 0x21, 0xe5, 0x8a, 0x04, 0xae, 0xf5, 0x8d,
++	0xbd, 0x9b, 0xca, 0x7f, 0x54, 0xe5, 0x1e, 0xfc, 0x0c, 0xdf, 0xe4, 0x1a, 0x20, 0x25, 0x2a, 0x6d,
++	0xef, 0x09, 0x5a, 0xac, 0x26, 0xf6, 0x2e, 0xc6, 0xc1, 0x11, 0x49, 0xdf, 0x8e, 0xa2, 0xa3, 0x69,
++	0x75, 0x9b, 0xa8, 0xc1, 0x90, 0x01, 0xc8, 0x17, 0xb4, 0x0a, 0xe3, 0x70, 0xf4, 0xd5, 0xbe, 0x4f,
++	0x54, 0xe2, 0xe3, 0xa1, 0xce, 0x8f, 0xa9, 0x46, 0x73, 0x5d, 0x9e, 0x1a, 0x96, 0x4e, 0x24, 0xaf,
++	0x87, 0x4f, 0x74, 0x9b, 0x61, 0xc2, 0xcd, 0x36, 0xd5, 0x7c, 0xd4, 0xe2, 0x60, 0xe4, 0x20, 0x3c,
++	0x8d, 0xfd, 0x10, 0xc8, 0x8d, 0x06, 0x26, 0xb1, 0xd2, 0x22, 0xc8, 0x01, 0x82, 0x37, 0x94, 0x90,
++	0x69, 0x79, 0x2b, 0x8d, 0x1b, 0x13, 0x80, 0x80, 0x7f, 0xf5, 0xec, 0x0a, 0x5d, 0x3c, 0x8f, 0xfe,
++	0x61, 0x2b, 0x0a, 0x31, 0xa6, 0xf1, 0x34, 0x93, 0x98, 0x70, 0x92, 0x49, 0x4e, 0xdc, 0xdc, 0xeb,
++	0x37, 0xbb, 0x1b, 0xaa, 0xc0, 0xe5, 0xd1, 0x00, 0xaf, 0x2e, 0x35, 0x75, 0x58, 0xdf, 0xaf, 0x99,
++	0xe2, 0x9c, 0xbe, 0x47, 0x1d, 0xa1, 0xba, 0x7b, 0x83, 0xad, 0xc4, 0x80, 0xf6, 0x80, 0xea, 0x3b,
++	0x45, 0x0e, 0xb8, 0xd7, 0x45, 0x8f, 0x5f, 0xbc, 0x26, 0x48, 0x82, 0x75, 0x09, 0x2d, 0x5e, 0xe2,
++	0x8f, 0x3d, 0xf4, 0x36, 0xcc, 0x52, 0x6a, 0x5d, 0x99, 0xa1, 0x69, 0x41, 0xf6, 0x58, 0x13, 0xc8,
++	0xb5, 0x21, 0xb0, 0x4a, 0x42, 0x90, 0x1a, 0x46, 0xcc, 0x25, 0x83, 0x37, 0xe2, 0x42, 0x58, 0x48,
++	0x45, 0x15, 0xc7, 0xb0, 0x58, 0xd7, 0x66, 0xf6, 0xab, 0xaf, 0xb0, 0x8e, 0x47, 0xfd, 0x96, 0xec,
++	0x86, 0x2c, 0xb8, 0xda, 0xfc, 0x43, 0x25, 0x57, 0x44, 0xb5, 0x71, 0xb0, 0x10, 0x46, 0x3f, 0x3c,
++	0x0c, 0x90, 0x6d, 0x61, 0x4a, 0xe3, 0x48, 0xe5, 0xb8, 0xf9, 0x09, 0xa7, 0xaf, 0x23, 0xf2, 0x91,
++	0x40, 0x67, 0x48, 0xda, 0x9e, 0x31, 0x9b, 0x2d, 0x77, 0xa5, 0xe6, 0x58, 0x2e, 0x43, 0xe5, 0x4a,
++	0x7f, 0x0c, 0x0a, 0xb0, 0xab, 0x66, 0x6e, 0xca, 0xae, 0x2e, 0x3b, 0x24, 0x7e, 0xa1, 0x7f, 0xc4,
++	0x77, 0xd3, 0x8b, 0x90, 0xf8, 0x27, 0x35, 0xf2, 0xc6, 0x1b, 0x2d, 0x91, 0xeb, 0x0c, 0xa2, 0xd6,
++	0xd8, 0xcd, 0x5c, 0x2f, 0x48, 0x41, 0x4c, 0xcc, 0xba, 0x7c, 0x04, 0x46, 0xc2, 0xbb, 0x5d, 0xda,
++	0x14, 0xe6, 0x43, 0x6e, 0x30, 0x44, 0x10, 0x85, 0x49, 0xe4, 0xfe, 0x6a, 0xd6, 0x56, 0x0c, 0x72,
++	0xf0, 0x42, 0xf8, 0x44, 0x74, 0xbf, 0x41, 0x35, 0x20, 0xff, 0x93, 0x40, 0xf8, 0xcf, 0x26, 0x57,
++	0x7d, 0x32, 0x67, 0x51, 0x16, 0x1b, 0x6d, 0x81, 0x82, 0x08, 0xf1, 0x73, 0xdf, 0xc5, 0x7b, 0x4d,
++	0xf7, 0x63, 0xeb, 0x08, 0xf8, 0xf9, 0xf5, 0x05, 0x00, 0x9d, 0x87, 0x29, 0x1f, 0x2f, 0x40, 0xfb,
++	0x2a, 0xcd, 0x37, 0x2e, 0x8e, 0xba, 0x01, 0x96, 0x8f, 0x5c, 0x06, 0x9d, 0x8d, 0x0f, 0xf9, 0x9a,
++	0x26, 0x0d, 0x63, 0x5f, 0xe7, 0x62, 0x25, 0x33, 0x0d, 0x75, 0x9b, 0x66, 0xa3, 0x9d, 0x53, 0xd2,
++	0xdc, 0x3b, 0x3b, 0xb6, 0x42, 0x51, 0x94, 0xb0, 0xab, 0x71, 0x12, 0xb2, 0xa1, 0x17, 0xbd, 0xfe,
++};
+diff --git a/core/arch/arm/plat-nuvoton/whc.h b/core/arch/arm/plat-nuvoton/whc.h
+new file mode 100644
+index 0000000..f8209ba
+--- /dev/null
++++ b/core/arch/arm/plat-nuvoton/whc.h
+@@ -0,0 +1,276 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2020 Nuvoton Technology Corp. All rights reserved.
++ */
++#ifndef __WHC_H__
++#define __WHC_H__
++
++#define WKCTL			0x000
++#define INTEN			0x004
++#define INTSTS			0x008
++#define CPSTS			0x040
++#define GINTTRG			0x080
++#define TXCTL			0x0C0
++#define TXSTS			0x0C4
++#define RXCTL			0x0C8
++#define RXSTS			0x0CC
++#define TMDAT(x, y)		(0x100 + ((x) * 0x10) + ((y) * 0x4))
++#define RMDAT(x, y)		(0x200 + ((x) * 0x10) + ((y) * 0x4))
++
++#define WHC_WKCTL_RST0WKEN_Pos              (0)
++#define WHC_WKCTL_RST0WKEN_Msk              (0x1ul << WHC_WKCTL_RST0WKEN_Pos)
++
++#define WHC_WKCTL_POFF0WKEN_Pos             (1)
++#define WHC_WKCTL_POFF0WKEN_Msk             (0x1ul << WHC_WKCTL_POFF0WKEN_Pos)
++
++#define WHC_WKCTL_PD0WKEN_Pos               (2)
++#define WHC_WKCTL_PD0WKEN_Msk               (0x1ul << WHC_WKCTL_PD0WKEN_Pos)
++
++#define WHC_WKCTL_RST1WKEN_Pos              (3)
++#define WHC_WKCTL_RST1WKEN_Msk              (0x1ul << WHC_WKCTL_RST1WKEN_Pos)
++
++#define WHC_WKCTL_POFF1WKEN_Pos             (4)
++#define WHC_WKCTL_POFF1WKEN_Msk             (0x1ul << WHC_WKCTL_POFF1WKEN_Pos)
++
++#define WHC_WKCTL_PD1WKEN_Pos               (5)
++#define WHC_WKCTL_PD1WKEN_Msk               (0x1ul << WHC_WKCTL_PD1WKEN_Pos)
++
++#define WHC_WKCTL_GI0WKEN_Pos               (8)
++#define WHC_WKCTL_GI0WKEN_Msk               (0x1ul << WHC_WKCTL_GI0WKEN_Pos)
++
++#define WHC_WKCTL_GI1WKEN_Pos               (9)
++#define WHC_WKCTL_GI1WKEN_Msk               (0x1ul << WHC_WKCTL_GI1WKEN_Pos)
++
++#define WHC_WKCTL_GI2WKEN_Pos               (10)
++#define WHC_WKCTL_GI2WKEN_Msk               (0x1ul << WHC_WKCTL_GI2WKEN_Pos)
++
++#define WHC_WKCTL_GI3WKEN_Pos               (11)
++#define WHC_WKCTL_GI3WKEN_Msk               (0x1ul << WHC_WKCTL_GI3WKEN_Pos)
++
++#define WHC_WKCTL_TX0WKEN_Pos               (16)
++#define WHC_WKCTL_TX0WKEN_Msk               (0x1ul << WHC_WKCTL_TX0WKEN_Pos)
++
++#define WHC_WKCTL_TX1WKEN_Pos               (17)
++#define WHC_WKCTL_TX1WKEN_Msk               (0x1ul << WHC_WKCTL_TX1WKEN_Pos)
++
++#define WHC_WKCTL_TX2WKEN_Pos               (18)
++#define WHC_WKCTL_TX2WKEN_Msk               (0x1ul << WHC_WKCTL_TX2WKEN_Pos)
++
++#define WHC_WKCTL_TX3WKEN_Pos               (19)
++#define WHC_WKCTL_TX3WKEN_Msk               (0x1ul << WHC_WKCTL_TX3WKEN_Pos)
++
++#define WHC_WKCTL_RX0WKEN_Pos               (24)
++#define WHC_WKCTL_RX0WKEN_Msk               (0x1ul << WHC_WKCTL_RX0WKEN_Pos)
++
++#define WHC_WKCTL_RX1WKEN_Pos               (25)
++#define WHC_WKCTL_RX1WKEN_Msk               (0x1ul << WHC_WKCTL_RX1WKEN_Pos)
++
++#define WHC_WKCTL_RX2WKEN_Pos               (26)
++#define WHC_WKCTL_RX2WKEN_Msk               (0x1ul << WHC_WKCTL_RX2WKEN_Pos)
++
++#define WHC_WKCTL_RX3WKEN_Pos               (27)
++#define WHC_WKCTL_RX3WKEN_Msk               (0x1ul << WHC_WKCTL_RX3WKEN_Pos)
++
++#define WHC_INTEN_RST0IEN_Pos               (0)
++#define WHC_INTEN_RST0IEN_Msk               (0x1ul << WHC_INTEN_RST0IEN_Pos)
++
++#define WHC_INTEN_POFF0IEN_Pos              (1)
++#define WHC_INTEN_POFF0IEN_Msk              (0x1ul << WHC_INTEN_POFF0IEN_Pos)
++
++#define WHC_INTEN_PD0IEN_Pos                (2)
++#define WHC_INTEN_PD0IEN_Msk                (0x1ul << WHC_INTEN_PD0IEN_Pos)
++
++#define WHC_INTEN_RST1IEN_Pos               (3)
++#define WHC_INTEN_RST1IEN_Msk               (0x1ul << WHC_INTEN_RST1IEN_Pos)
++
++#define WHC_INTEN_POFF1IEN_Pos              (4)
++#define WHC_INTEN_POFF1IEN_Msk              (0x1ul << WHC_INTEN_POFF1IEN_Pos)
++
++#define WHC_INTEN_PD1IEN_Pos                (5)
++#define WHC_INTEN_PD1IEN_Msk                (0x1ul << WHC_INTEN_PD1IEN_Pos)
++
++#define WHC_INTEN_GI0IEN_Pos                (8)
++#define WHC_INTEN_GI0IEN_Msk                (0x1ul << WHC_INTEN_GI0IEN_Pos)
++
++#define WHC_INTEN_GI1IEN_Pos                (9)
++#define WHC_INTEN_GI1IEN_Msk                (0x1ul << WHC_INTEN_GI1IEN_Pos)
++
++#define WHC_INTEN_GI2IEN_Pos                (10)
++#define WHC_INTEN_GI2IEN_Msk                (0x1ul << WHC_INTEN_GI2IEN_Pos)
++
++#define WHC_INTEN_GI3IEN_Pos                (11)
++#define WHC_INTEN_GI3IEN_Msk                (0x1ul << WHC_INTEN_GI3IEN_Pos)
++
++#define WHC_INTEN_TX0IEN_Pos                (16)
++#define WHC_INTEN_TX0IEN_Msk                (0x1ul << WHC_INTEN_TX0IEN_Pos)
++
++#define WHC_INTEN_TX1IEN_Pos                (17)
++#define WHC_INTEN_TX1IEN_Msk                (0x1ul << WHC_INTEN_TX1IEN_Pos)
++
++#define WHC_INTEN_TX2IEN_Pos                (18)
++#define WHC_INTEN_TX2IEN_Msk                (0x1ul << WHC_INTEN_TX2IEN_Pos)
++
++#define WHC_INTEN_TX3IEN_Pos                (19)
++#define WHC_INTEN_TX3IEN_Msk                (0x1ul << WHC_INTEN_TX3IEN_Pos)
++
++#define WHC_INTEN_RX0IEN_Pos                (24)
++#define WHC_INTEN_RX0IEN_Msk                (0x1ul << WHC_INTEN_RX0IEN_Pos)
++
++#define WHC_INTEN_RX1IEN_Pos                (25)
++#define WHC_INTEN_RX1IEN_Msk                (0x1ul << WHC_INTEN_RX1IEN_Pos)
++
++#define WHC_INTEN_RX2IEN_Pos                (26)
++#define WHC_INTEN_RX2IEN_Msk                (0x1ul << WHC_INTEN_RX2IEN_Pos)
++
++#define WHC_INTEN_RX3IEN_Pos                (27)
++#define WHC_INTEN_RX3IEN_Msk                (0x1ul << WHC_INTEN_RX3IEN_Pos)
++
++#define WHC_INTSTS_RST0IF_Pos               (0)
++#define WHC_INTSTS_RST0IF_Msk               (0x1ul << WHC_INTSTS_RST0IF_Pos)
++
++#define WHC_INTSTS_POFF0IF_Pos              (1)
++#define WHC_INTSTS_POFF0IF_Msk              (0x1ul << WHC_INTSTS_POFF0IF_Pos)
++
++#define WHC_INTSTS_PD0IF_Pos                (2)
++#define WHC_INTSTS_PD0IF_Msk                (0x1ul << WHC_INTSTS_PD0IF_Pos)
++
++#define WHC_INTSTS_RST1IF_Pos               (3)
++#define WHC_INTSTS_RST1IF_Msk               (0x1ul << WHC_INTSTS_RST1IF_Pos)
++
++#define WHC_INTSTS_POFF1IF_Pos              (4)
++#define WHC_INTSTS_POFF1IF_Msk              (0x1ul << WHC_INTSTS_POFF1IF_Pos)
++
++#define WHC_INTSTS_PD1IF_Pos                (5)
++#define WHC_INTSTS_PD1IF_Msk                (0x1ul << WHC_INTSTS_PD1IF_Pos)
++
++#define WHC_INTSTS_GI0IF_Pos                (8)
++#define WHC_INTSTS_GI0IF_Msk                (0x1ul << WHC_INTSTS_GI0IF_Pos)
++
++#define WHC_INTSTS_GI1IF_Pos                (9)
++#define WHC_INTSTS_GI1IF_Msk                (0x1ul << WHC_INTSTS_GI1IF_Pos)
++
++#define WHC_INTSTS_GI2IF_Pos                (10)
++#define WHC_INTSTS_GI2IF_Msk                (0x1ul << WHC_INTSTS_GI2IF_Pos)
++
++#define WHC_INTSTS_GI3IF_Pos                (11)
++#define WHC_INTSTS_GI3IF_Msk                (0x1ul << WHC_INTSTS_GI3IF_Pos)
++
++#define WHC_INTSTS_TX0IF_Pos                (16)
++#define WHC_INTSTS_TX0IF_Msk                (0x1ul << WHC_INTSTS_TX0IF_Pos)
++
++#define WHC_INTSTS_TX1IF_Pos                (17)
++#define WHC_INTSTS_TX1IF_Msk                (0x1ul << WHC_INTSTS_TX1IF_Pos)
++
++#define WHC_INTSTS_TX2IF_Pos                (18)
++#define WHC_INTSTS_TX2IF_Msk                (0x1ul << WHC_INTSTS_TX2IF_Pos)
++
++#define WHC_INTSTS_TX3IF_Pos                (19)
++#define WHC_INTSTS_TX3IF_Msk                (0x1ul << WHC_INTSTS_TX3IF_Pos)
++
++#define WHC_INTSTS_RX0IF_Pos                (24)
++#define WHC_INTSTS_RX0IF_Msk                (0x1ul << WHC_INTSTS_RX0IF_Pos)
++
++#define WHC_INTSTS_RX1IF_Pos                (25)
++#define WHC_INTSTS_RX1IF_Msk                (0x1ul << WHC_INTSTS_RX1IF_Pos)
++
++#define WHC_INTSTS_RX2IF_Pos                (26)
++#define WHC_INTSTS_RX2IF_Msk                (0x1ul << WHC_INTSTS_RX2IF_Pos)
++
++#define WHC_INTSTS_RX3IF_Pos                (27)
++#define WHC_INTSTS_RX3IF_Msk                (0x1ul << WHC_INTSTS_RX3IF_Pos)
++
++#define WHC_CPSTS_WDTRF_Pos                 (2)
++#define WHC_CPSTS_WDTRF_Msk                 (0x1ul << WHC_INTSTS_WDTRF_Pos)
++
++#define WHC_CPSTS_SYSRF_Pos                 (5)
++#define WHC_CPSTS_SYSRF_Msk                 (0x1ul << WHC_INTSTS_SYSRF_Pos)
++
++#define WHC_CPSTS_CPURF_Pos                 (7)
++#define WHC_CPSTS_CPURF_Msk                 (0x1ul << WHC_INTSTS_CPURF_Pos)
++
++#define WHC_CPSTS_CPULKRF_Pos               (8)
++#define WHC_CPSTS_CPULKRF_Msk               (0x1ul << WHC_INTSTS_CPULKRF_Pos)
++
++#define WHC_CPSTS_OPMODE_Pos                (24)
++#define WHC_CPSTS_OPMODE_Msk                (0xful << WHC_INTSTS_OPMODE_Pos)
++
++#define WHC_GINTTRG_TRGG0_Pos               (0)
++#define WHC_GINTTRG_TRGG0_Msk               (0x1ul << WHC_GINTTRG_TRGG0_Pos)
++
++#define WHC_GINTTRG_TRGG1_Pos               (1)
++#define WHC_GINTTRG_TRGG1_Msk               (0x1ul << WHC_GINTTRG_TRGG1_Pos)
++
++#define WHC_GINTTRG_TRGG2_Pos               (2)
++#define WHC_GINTTRG_TRGG2_Msk               (0x1ul << WHC_GINTTRG_TRGG2_Pos)
++
++#define WHC_GINTTRG_TRGG3_Pos               (3)
++#define WHC_GINTTRG_TRGG3_Msk               (0x1ul << WHC_GINTTRG_TRGG3_Pos)
++
++#define WHC_TXCTL_CH0SND_Pos                (0)
++#define WHC_TXCTL_CH0SND_Msk                (0x1ul << WHC_TXCTL_CH0SND_Pos)
++
++#define WHC_TXCTL_CH1SND_Pos                (1)
++#define WHC_TXCTL_CH1SND_Msk                (0x1ul << WHC_TXCTL_CH1SND_Pos)
++
++#define WHC_TXCTL_CH2SND_Pos                (2)
++#define WHC_TXCTL_CH2SND_Msk                (0x1ul << WHC_TXCTL_CH2SND_Pos)
++
++#define WHC_TXCTL_CH3SND_Pos                (3)
++#define WHC_TXCTL_CH3SND_Msk                (0x1ul << WHC_TXCTL_CH3SND_Pos)
++
++#define WHC_TXCTL_CH0RC_Pos                 (16)
++#define WHC_TXCTL_CH0RC_Msk                 (0x1ul << WHC_TXCTL_CH0RC_Pos)
++
++#define WHC_TXCTL_CH1RC_Pos                 (17)
++#define WHC_TXCTL_CH1RC_Msk                 (0x1ul << WHC_TXCTL_CH1RC_Pos)
++
++#define WHC_TXCTL_CH2RC_Pos                 (18)
++#define WHC_TXCTL_CH2RC_Msk                 (0x1ul << WHC_TXCTL_CH2RC_Pos)
++
++#define WHC_TXCTL_CH3RC_Pos                 (19)
++#define WHC_TXCTL_CH3RC_Msk                 (0x1ul << WHC_TXCTL_CH3RC_Pos)
++
++#define WHC_TXSTS_CH0RDY_Pos                (0)
++#define WHC_TXSTS_CH0RDY_Msk                (0x1ul << WHC_TXSTS_CH0RDY_Pos)
++
++#define WHC_TXSTS_CH1RDY_Pos                (1)
++#define WHC_TXSTS_CH1RDY_Msk                (0x1ul << WHC_TXSTS_CH1RDY_Pos)
++
++#define WHC_TXSTS_CH2RDY_Pos                (2)
++#define WHC_TXSTS_CH2RDY_Msk                (0x1ul << WHC_TXSTS_CH2RDY_Pos)
++
++#define WHC_TXSTS_CH3RDY_Pos                (3)
++#define WHC_TXSTS_CH3RDY_Msk                (0x1ul << WHC_TXSTS_CH3RDY_Pos)
++
++#define WHC_RXCTL_CH0ACK_Pos                (0)
++#define WHC_RXCTL_CH0ACK_Msk                (0x1ul << WHC_RXCTL_CH0ACK_Pos)
++
++#define WHC_RXCTL_CH1ACK_Pos                (1)
++#define WHC_RXCTL_CH1ACK_Msk                (0x1ul << WHC_RXCTL_CH1ACK_Pos)
++
++#define WHC_RXCTL_CH2ACK_Pos                (2)
++#define WHC_RXCTL_CH2ACK_Msk                (0x1ul << WHC_RXCTL_CH2ACK_Pos)
++
++#define WHC_RXCTL_CH3ACK_Pos                (3)
++#define WHC_RXCTL_CH3ACK_Msk                (0x1ul << WHC_RXCTL_CH3ACK_Pos)
++
++#define WHC_RXSTS_CH0RDY_Pos                (0)
++#define WHC_RXSTS_CH0RDY_Msk                (0x1ul << WHC_RXSTS_CH0RDY_Pos)
++
++#define WHC_RXSTS_CH1RDY_Pos                (1)
++#define WHC_RXSTS_CH1RDY_Msk                (0x1ul << WHC_RXSTS_CH1RDY_Pos)
++
++#define WHC_RXSTS_CH2RDY_Pos                (2)
++#define WHC_RXSTS_CH2RDY_Msk                (0x1ul << WHC_RXSTS_CH2RDY_Pos)
++
++#define WHC_RXSTS_CH3RDY_Pos                (3)
++#define WHC_RXSTS_CH3RDY_Msk                (0x1ul << WHC_RXSTS_CH3RDY_Pos)
++
++#define WHC_TMDAT_DAT_Pos                   (0)
++#define WHC_TMDAT_DAT_Msk                   (0xfffffffful << WHC_TMDAT_DAT_Pos)
++
++#define WHC_RMDAT_DAT_Pos                   (0)
++#define WHC_RMDAT_DAT_Msk                   (0xfffffffful << WHC_RMDAT_DAT_Pos)
++
++#endif
++
+diff --git a/core/drivers/nuvoton_uart.c b/core/drivers/nuvoton_uart.c
+new file mode 100644
+index 0000000..15019b7
+--- /dev/null
++++ b/core/drivers/nuvoton_uart.c
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: BSD-2-Clause
++/*
++ * Copyright (c) 2016, Spreadtrum Communications Inc.
++ * Copyright (c) 2017, Linaro Limited
++ * Copyright (C) 2020, Nuvoton Technology Corporation
++ * Copyright (c) 2022, UWINGS Technologies
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <drivers/nuvoton_uart.h>
++#include <io.h>
++#include <keep.h>
++#include <util.h>
++
++/* need UART regs range for address mapping */
++#define UART_REG_SIZE    (0x1C)  /*!< only for the console setting */
++
++/* Register definitions */
++#define REG_RBR          (0x00)  /*!< Receive Buffer Register */
++#define REG_THR          (0x00)  /*!< Transmit Holding Register */
++
++#define REG_FSR          (0x18)  /*!< FIFO Status Register */
++
++#define TX_FULL          (0x1<<23)
++#define TX_EMPTY         (0x1<<22)
++#define RX_FULL          (0x1<<15)
++#define RX_EMPTY         (0x1<<14)
++
++static vaddr_t chip_to_base(struct serial_chip *chip)
++{
++	struct nuvoton_uart_data *pd =
++		container_of(chip, struct nuvoton_uart_data, chip);
++
++	return io_pa_or_va(&pd->base, UART_REG_SIZE);
++}
++
++static void nuvoton_uart_flush(struct serial_chip *chip)
++{
++	vaddr_t base = chip_to_base(chip);
++
++	while (!(io_read32(base + REG_FSR) & TX_EMPTY))
++		;
++}
++
++static bool nuvoton_uart_have_rx_data(struct serial_chip *chip)
++{
++	vaddr_t base = chip_to_base(chip);
++
++	return !(io_read32(base + REG_FSR) & RX_EMPTY);
++}
++
++static void nuvoton_uart_putc(struct serial_chip *chip, int ch)
++{
++	vaddr_t base = chip_to_base(chip);
++
++	nuvoton_uart_flush(chip);
++	io_write32(base + REG_THR, ch);
++}
++
++static int nuvoton_uart_getchar(struct serial_chip *chip)
++{
++	vaddr_t base = chip_to_base(chip);
++
++	while (!nuvoton_uart_have_rx_data(chip))
++		;
++
++	return io_read32(base + REG_RBR) & 0xff;
++}
++
++static const struct serial_ops nuvoton_uart_ops = {
++	.flush = nuvoton_uart_flush,
++	.getchar = nuvoton_uart_getchar,
++	.have_rx_data = nuvoton_uart_have_rx_data,
++	.putc = nuvoton_uart_putc,
++};
++// KEEP_PAGER(nuvoton_uart_ops);
++
++void nuvoton_uart_init(struct nuvoton_uart_data *pd, paddr_t base)
++{
++	pd->base.pa = base;
++	pd->chip.ops = &nuvoton_uart_ops;
++}
+diff --git a/core/drivers/sub.mk b/core/drivers/sub.mk
+index 72e4288..a6d58d4 100644
+--- a/core/drivers/sub.mk
++++ b/core/drivers/sub.mk
+@@ -56,6 +56,7 @@ srcs-$(CFG_ZYNQMP_CSU_AES) += zynqmp_csu_aes.c
+ srcs-$(CFG_ZYNQMP_PM) += zynqmp_pm.c
+ srcs-$(CFG_ZYNQMP_HUK) += zynqmp_huk.c
+ srcs-$(CFG_ARM_SMCCC_TRNG) += smccc_trng.c
++srcs-$(CFG_NUVOTON_UART) += nuvoton_uart.c
+ 
+ subdirs-y += crypto
+ subdirs-$(CFG_BNXT_FW) += bnxt
+diff --git a/core/include/drivers/nuvoton_uart.h b/core/include/drivers/nuvoton_uart.h
+new file mode 100644
+index 0000000..edf4520
+--- /dev/null
++++ b/core/include/drivers/nuvoton_uart.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2016, Spreadtrum Communications Inc.
++ * Copyright (c) 2017, Linaro Limited
++ * Copyright (C) 2020, Nuvoton Technology Corporation
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++#ifndef NUA_UART_H
++#define NUA_UART_H
++
++#include <types_ext.h>
++#include <drivers/serial.h>
++
++struct nuvoton_uart_data {
++	struct io_pa_va base;
++	struct serial_chip chip;
++};
++
++void nuvoton_uart_init(struct nuvoton_uart_data *pd, paddr_t base);
++
++#endif /* NUA_UART_H */
++
+-- 
+2.38.1
+
