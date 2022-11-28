@@ -22,7 +22,7 @@ KERNEL_EXTRA_ARGS += "LOADADDR=${ma35d1_KERNEL_LOADADDR}"
 
 SRCBRANCH = "master"
 LOCALVERSION = "-${SRCBRANCH}"
-KERNEL_SRCREV ?= "20db7928f555f3a9d3b1ba6290de65b23cfefe5e"
+KERNEL_SRCREV ?= "67bfa6069b3ec4bd084eb817691c3eea8f9eb40d"
 KERNEL_SRC = "git://github.com/OpenNuvoton/MA35D1_linux-5.10.y.git;protocol=https;branch=${SRCBRANCH}"
 SRC_URI:ma35d1 = "${KERNEL_SRC}"
 SRC_URI:append:ma35d1 = " \
