@@ -9,6 +9,7 @@
   <project remote="uwings" name="MA35D1_Yocto" revision="kirkstone" path="sources"/>
   <project remote="yocto" revision="kirkstone" name="poky" path="sources/poky"/>
   <project remote="yocto" revision="kirkstone" name="meta-virtualization" path="sources/meta-virtualization"/>
+  <project remote="yocto" revision="kirkstone" name="meta-arm" path="sources/meta-arm"
   <project remote="oe" revision="kirkstone" name="meta-openembedded" path="sources/meta-openembedded"/>
   <project remote="qt" revision="kirkstone" name="meta-qt5" upstream="dunfell" path="sources/meta-qt5"/>
 
